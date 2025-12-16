@@ -20,7 +20,6 @@ import android.media.MediaRecorder
 import android.os.Bundle
 import android.os.Handler
 import android.os.HandlerThread
-import android.util.Log
 import android.util.Size
 import android.view.Surface
 import android.view.SurfaceView
@@ -30,10 +29,17 @@ import android.widget.TextView
 import androidx.annotation.RequiresPermission
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
+import androidx.lifecycle.lifecycleScope
 import java.nio.ByteBuffer
 import java.security.MessageDigest
 import java.util.concurrent.ArrayBlockingQueue
 import kotlin.concurrent.thread
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import org.json.JSONArray
 
 class MainActivity : AppCompatActivity(), SensorEventListener {
 
@@ -43,7 +49,7 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     private var cameraDevice: CameraDevice? = null
     private lateinit var cameraManager: CameraManager
     private var imageReader: ImageReader? = null
-    private val entropyBuffer = ArrayBlockingQueue<ByteArray>(100)  // Pooling queue
+    private val entropyBuffer = ArrayBlockingQueue<ByteArray>(100)
     private lateinit var handler: Handler
     private lateinit var handlerThread: HandlerThread
 
@@ -59,7 +65,6 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         handlerThread = HandlerThread("CameraThread").apply { start() }
         handler = Handler(handlerThread.looper)
 
-        // Permissions
         if (ActivityCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED ||
             ActivityCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
             ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.CAMERA), 1)
@@ -73,9 +78,36 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
             val count = findViewById<EditText>(R.id.editCount).text.toString().toIntOrNull() ?: 1
             val validCount = count.coerceIn(1, 10)
             val validMax = max.coerceIn(min, 100)
-            val numbers = generateRandomNumbers(validCount, min, validMax)
-            findViewById<TextView>(R.id.outputText).text = numbers.joinToString(", ")
+
+            lifecycleScope.launch {
+                findViewById<TextView>(R.id.outputText).text = "Загрузка Kp и генерация..."
+                val kp = fetchKpIndex()
+                val numbers = generateRandomNumbers(validCount, min, validMax, kp)
+                findViewById<TextView>(R.id.outputText).text = "Kp: $kp\n${numbers.joinToString(", ")}"
+            }
         }
+    }
+
+    private suspend fun fetchKpIndex(): Float = withContext(Dispatchers.IO) {
+        try {
+            val client = OkHttpClient()
+            val request = Request.Builder()
+                .url("https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json")
+                .header("User-Agent", "EntropyRNG App (your@email.com)") // Рекомендуется NOAA
+                .build()
+            val response = client.newCall(request).execute()
+            if (response.isSuccessful) {
+                val jsonText = response.body?.string() ?: return@withContext 0f
+                val jsonArray = JSONArray(jsonText)
+                if (jsonArray.length() > 1) {
+                    val lastEntry = jsonArray.getJSONArray(jsonArray.length() - 1)
+                    return@withContext lastEntry.getString(1).toFloatOrNull() ?: 0f
+                }
+            }
+        } catch (e: Exception) {
+            // Ошибка сети — возвращаем 0
+        }
+        0f
     }
 
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
@@ -126,7 +158,7 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     }
 
     private fun startCamera() {
-        val cameraId = "0"  // Back camera
+        val cameraId = "0"
         if (ActivityCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) return
 
         cameraManager.openCamera(cameraId, object : CameraDevice.StateCallback() {
@@ -134,7 +166,7 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
                 cameraDevice = camera
                 val characteristics = cameraManager.getCameraCharacteristics(cameraId)
                 val previewSize = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)!!
-                    .getOutputSizes(ImageFormat.YUV_420_888).first { it.width <= 320 && it.height <= 240 }  // Small for entropy
+                    .getOutputSizes(ImageFormat.YUV_420_888).first { it.width <= 320 && it.height <= 240 }
 
                 imageReader = ImageReader.newInstance(previewSize.width, previewSize.height, ImageFormat.YUV_420_888, 2)
                 imageReader?.setOnImageAvailableListener({ reader ->
@@ -142,19 +174,19 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
                     if (image != null) {
                         val yPlane = image.planes[0]
                         val bytes = ByteArray(yPlane.buffer.remaining())
-                        yPlane.buffer.get(bytes)  // Y plane for noise
+                        yPlane.buffer.get(bytes)
                         entropyBuffer.offer(bytes)
                         image.close()
                     }
                 }, handler)
 
-                val surfaces = listOf(imageReader!!.surface)  // No preview needed
+                val surfaces = listOf(imageReader!!.surface)
 
                 camera.createCaptureSession(surfaces, object : CameraCaptureSession.StateCallback() {
                     override fun onConfigured(session: CameraCaptureSession) {
                         val request = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
                         request.addTarget(imageReader!!.surface)
-                        request.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)  // For noise
+                        request.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
                         session.setRepeatingRequest(request.build(), null, handler)
                     }
                     override fun onConfigureFailed(session: CameraCaptureSession) {}
@@ -165,28 +197,47 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         }, handler)
     }
 
-    private fun generateRandomNumbers(count: Int, min: Int, max: Int): List<Int> {
+    private fun generateRandomNumbers(count: Int, min: Int, max: Int, kp: Float): List<Int> {
+        entropyBuffer.clear()
+
         val rawEntropy = ByteArray(1024)
         var offset = 0
-        while (offset < 1024) {
-            val chunk = entropyBuffer.poll() ?: continue
+        val timeout = System.currentTimeMillis() + 5000
+        while (offset < 1024 && System.currentTimeMillis() < timeout) {
+            val chunk = entropyBuffer.poll(100, java.util.concurrent.TimeUnit.MILLISECONDS) ?: continue
             System.arraycopy(chunk, 0, rawEntropy, offset, chunk.size.coerceAtMost(1024 - offset))
             offset += chunk.size
         }
+        if (offset < 1024) {
+            throw IllegalStateException("Not enough entropy")
+        }
 
-        // Post-processing: XOR debias
         val debaised = ByteArray(rawEntropy.size / 2)
         for (i in debaised.indices) {
             debaised[i] = (rawEntropy[2 * i].toInt() xor rawEntropy[2 * i + 1].toInt()).toByte()
         }
 
-        // Hashing (SHA-256)
         val sha256 = MessageDigest.getInstance("SHA-256")
+        sha256.update(System.currentTimeMillis().toString().toByteArray())
+        sha256.update(kp.toString().toByteArray())
         val hash = sha256.digest(debaised)
 
-        // Generate numbers in range
         val range = max - min + 1
-        return (0 until count).map { min + ((hash[it % hash.size].toInt() and 0xFF) % range) }
+        if (count > range) {
+            throw IllegalArgumentException("Cannot generate $count unique numbers")
+        }
+
+        val uniqueNumbers = mutableSetOf<Int>()
+        var hashIndex = 0
+        while (uniqueNumbers.size < count) {
+            val number = min + ((hash[hashIndex % hash.size].toInt() and 0xFF) % range)
+            uniqueNumbers.add(number)
+            hashIndex++
+            if (hashIndex > hash.size * 100) {
+                throw IllegalStateException("Not enough entropy for unique")
+            }
+        }
+        return uniqueNumbers.toList()
     }
 
     override fun onPause() {
