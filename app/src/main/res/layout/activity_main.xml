@@ -1,62 +1,205 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:orientation="vertical"
-    android:padding="16dp">
+    android:fillViewport="true">
 
-    <TextView
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="Min (1+):" />
-
-    <EditText
-        android:id="@+id/editMin"
+    <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:inputType="number"
-        android:text="1" />
+        android:orientation="vertical"
+        android:padding="16dp">
 
-    <TextView
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="Max (до 100):" />
+        <!-- Заголовок -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="EntropyRNG 2.0"
+            android:textSize="24sp"
+            android:textStyle="bold"
+            android:layout_marginBottom="8dp" />
 
-    <EditText
-        android:id="@+id/editMax"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:inputType="number"
-        android:text="20" />
+        <!-- Статистика БД -->
+        <TextView
+            android:id="@+id/statsInfo"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="БД: 0 записей"
+            android:textSize="12sp"
+            android:textColor="#666666"
+            android:layout_marginBottom="16dp" />
 
-    <TextView
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="Количество (1-10):" />
+        <!-- Разделитель -->
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:background="#CCCCCC"
+            android:layout_marginBottom="16dp" />
 
-    <EditText
-        android:id="@+id/editCount"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:inputType="number"
-        android:text="8" />
+        <!-- Секция: Управление данными -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="📊 Управление данными"
+            android:textSize="16sp"
+            android:textStyle="bold"
+            android:layout_marginBottom="8dp" />
 
-    <Button
-        android:id="@+id/generateButton"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="Генерировать" />
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:layout_marginBottom="8dp">
 
-    <TextView
-        android:id="@+id/outputText"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="Результат:" />
+            <Button
+                android:id="@+id/importButton"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Импорт CSV"
+                android:layout_marginEnd="8dp" />
 
-    <SurfaceView
-        android:id="@+id/surfaceView"
-        android:layout_width="1dp"
-        android:layout_height="1dp"
-        android:visibility="gone" />
+            <Button
+                android:id="@+id/analyzeButton"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Анализ"
+                android:enabled="false" />
+        </LinearLayout>
 
-</LinearLayout>
+        <!-- Инфо о весах -->
+        <TextView
+            android:id="@+id/weightsInfo"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Топ числа: -"
+            android:textSize="12sp"
+            android:layout_marginBottom="16dp" />
+
+        <!-- Разделитель -->
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:background="#CCCCCC"
+            android:layout_marginBottom="16dp" />
+
+        <!-- Секция: Генерация -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="🎲 Генерация чисел"
+            android:textSize="16sp"
+            android:textStyle="bold"
+            android:layout_marginBottom="8dp" />
+
+        <!-- Режим генерации -->
+        <Switch
+            android:id="@+id/modeSwitch"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Калиброванная генерация (с весами)"
+            android:enabled="false"
+            android:layout_marginBottom="8dp" />
+
+        <!-- Min -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Min (1+):"
+            android:textSize="14sp" />
+
+        <EditText
+            android:id="@+id/editMin"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:inputType="number"
+            android:text="1"
+            android:layout_marginBottom="8dp" />
+
+        <!-- Max -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Max (до 100):"
+            android:textSize="14sp" />
+
+        <EditText
+            android:id="@+id/editMax"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:inputType="number"
+            android:text="20"
+            android:layout_marginBottom="8dp" />
+
+        <!-- Count -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Количество (1-10):"
+            android:textSize="14sp" />
+
+        <EditText
+            android:id="@+id/editCount"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:inputType="number"
+            android:text="8"
+            android:layout_marginBottom="8dp" />
+
+        <!-- Кнопка генерации -->
+        <Button
+            android:id="@+id/generateButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Генерировать"
+            android:textSize="16sp"
+            android:layout_marginBottom="8dp" />
+
+        <!-- Солнечная активность -->
+        <TextView
+            android:id="@+id/solarInfo"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Kp: -"
+            android:textSize="12sp"
+            android:textColor="#FF9800"
+            android:layout_marginBottom="8dp" />
+
+        <!-- Разделитель -->
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:background="#CCCCCC"
+            android:layout_marginBottom="8dp" />
+
+        <!-- Результат -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="📍 Результат:"
+            android:textSize="16sp"
+            android:textStyle="bold"
+            android:layout_marginBottom="8dp" />
+
+        <TextView
+            android:id="@+id/outputText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Нажмите 'Генерировать'"
+            android:textSize="18sp"
+            android:textStyle="bold"
+            android:textColor="#4CAF50"
+            android:padding="12dp"
+            android:background="#F5F5F5"
+            android:layout_marginBottom="16dp" />
+
+        <!-- Скрытая поверхность для камеры -->
+        <SurfaceView
+            android:id="@+id/surfaceView"
+            android:layout_width="1dp"
+            android:layout_height="1dp"
+            android:visibility="gone" />
+
+    </LinearLayout>
+</ScrollView>

@@ -1,5 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
-<resources>
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <!-- Base application theme. -->
+    <style name="Theme.EntropyRNG" parent="Theme.AppCompat.Light.DarkActionBar">
+        <!-- Основные цвета AppCompat -->
+        <item name="colorPrimary">#6200EE</item>
+        <item name="colorPrimaryDark">#3700B3</item>
+        <item name="colorAccent">#03DAC6</item>
 
-    <style name="Theme.EntropyRNG" parent="android:Theme.Material.Light.NoActionBar" />
+        <item name="android:textColorPrimary">#000000</item>
+        <item name="android:textColorSecondary">#666666</item>
+        <item name="android:textColorHint">#999999</item>
+
+        <!-- Цвет статус-бара (для Android 5.0+) -->
+        <item name="android:statusBarColor" tools:targetApi="l">#3700B3</item>
+
+        <!-- Опционально: цвет текста на primary фоне -->
+        <item name="android:textColorPrimary">#FFFFFF</item>
+    </style>
 </resources>
