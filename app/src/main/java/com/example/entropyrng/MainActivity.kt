@@ -83,29 +83,84 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     ) { uri ->
         uri?.let {
             lifecycleScope.launch {
-                importButton.isEnabled = false
-                Toast.makeText(this@MainActivity, "Импорт...", Toast.LENGTH_SHORT).show()
+                try {
+                    importButton.isEnabled = false
+                    Toast.makeText(this@MainActivity, "Импорт...", Toast.LENGTH_SHORT).show()
 
-                val result = importer.importFromCsv(it)
+                    // Проверяем текущее количество записей
+                    val currentCount = withContext(Dispatchers.IO) {
+                        db.numberDataDao().getCountBySource("imported")
+                    }
 
-                if (result.success) {
+                    if (currentCount > 0) {
+                        // Показываем диалог подтверждения
+                        val shouldProceed = withContext(Dispatchers.Main) {
+                            showImportConfirmationDialog(currentCount)
+                        }
+
+                        if (!shouldProceed) {
+                            // Пользователь отменил
+                            Toast.makeText(
+                                this@MainActivity,
+                                "Импорт отменён",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                            importButton.isEnabled = true
+                            return@launch
+                        }
+                    }
+
+                    val result = importer.importFromCsv(it)
+
+                    if (result.success) {
+                        Toast.makeText(
+                            this@MainActivity,
+                            "✓ ${result.message}",
+                            Toast.LENGTH_LONG
+                        ).show()
+                        analyzeButton.isEnabled = true
+                        updateStats()
+                    } else {
+                        Toast.makeText(
+                            this@MainActivity,
+                            "✗ ${result.message}",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+
+                } catch (e: Exception) {
                     Toast.makeText(
                         this@MainActivity,
-                        "✓ ${result.message}",
-                        Toast.LENGTH_LONG
+                        "Ошибка импорта: ${e.message}",
+                        Toast.LENGTH_SHORT
                     ).show()
-                    analyzeButton.isEnabled = true
-                    updateStats()
-                } else {
-                    Toast.makeText(
-                        this@MainActivity,
-                        "✗ ${result.message}",
-                        Toast.LENGTH_LONG
-                    ).show()
+                    e.printStackTrace()
+                } finally {
+                    importButton.isEnabled = true
                 }
-
-                importButton.isEnabled = true
             }
+        }
+    }
+
+    private suspend fun showImportConfirmationDialog(currentCount: Int): Boolean {
+        return withContext(Dispatchers.Main) {
+            var result = false
+            val dialog = androidx.appcompat.app.AlertDialog.Builder(this@MainActivity)
+                .setTitle("Повторный импорт")
+                .setMessage("В базе уже есть $currentCount импортированных записей.\n\nЭто создаст дубликаты. Продолжить?")
+                .setPositiveButton("Да") { _, _ -> result = true }
+                .setNegativeButton("Отмена") { _, _ -> result = false }
+                .setCancelable(false)
+                .create()
+
+            dialog.show()
+
+            // Ждём пока диалог закроется
+            while (dialog.isShowing) {
+                kotlinx.coroutines.delay(100)
+            }
+
+            result
         }
     }
 
@@ -118,9 +173,99 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         initializeUI()
         setupPermissions()
 
-        // Обновить статистику БД
+        // Восстановление состояния
+        if (savedInstanceState != null) {
+            restoreState(savedInstanceState)
+        }
+
+        // Обновить статистику БД и проверить наличие данных
         lifecycleScope.launch {
             updateStats()
+            checkDatabaseAndEnableButtons()
+        }
+    }
+
+    /**
+     * Проверяет наличие данных в БД и активирует кнопки
+     */
+    private suspend fun checkDatabaseAndEnableButtons() = withContext(Dispatchers.IO) {
+        val lotteryCount = db.numberDataDao().getCountBySource("lottery") +
+                db.numberDataDao().getCountBySource("imported")
+
+        withContext(Dispatchers.Main) {
+            if (lotteryCount > 0) {
+                // Есть данные → активируем кнопку "Анализ"
+                analyzeButton.isEnabled = true
+                Toast.makeText(
+                    this@MainActivity,
+                    "Найдено $lotteryCount тиражей в БД",
+                    Toast.LENGTH_SHORT
+                ).show()
+            } else {
+                // Нет данных → кнопка остаётся неактивной
+                analyzeButton.isEnabled = false
+            }
+        }
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+
+        // Сохраняем состояние
+        outState.putBoolean("hasWeights", currentWeights != null)
+        outState.putBoolean("analyzeEnabled", analyzeButton.isEnabled)
+        outState.putBoolean("switchEnabled", modeSwitch.isEnabled)
+        outState.putBoolean("switchChecked", modeSwitch.isChecked)
+
+        // Сохраняем веса (если есть)
+        if (currentWeights != null) {
+            val weightsArray = currentWeights!!.entries.map { "${it.key}:${it.value}" }.toTypedArray()
+            outState.putStringArray("weights", weightsArray)
+        }
+    }
+
+    private fun restoreState(savedInstanceState: Bundle) {
+        // Восстанавливаем состояние UI
+        val hasWeights = savedInstanceState.getBoolean("hasWeights", false)
+        val analyzeEnabled = savedInstanceState.getBoolean("analyzeEnabled", false)
+        val switchEnabled = savedInstanceState.getBoolean("switchEnabled", false)
+        val switchChecked = savedInstanceState.getBoolean("switchChecked", false)
+
+        analyzeButton.isEnabled = analyzeEnabled
+        modeSwitch.isEnabled = switchEnabled
+        modeSwitch.isChecked = switchChecked
+
+        // Восстанавливаем веса
+        if (hasWeights) {
+            val weightsArray = savedInstanceState.getStringArray("weights")
+            if (weightsArray != null) {
+                val restoredWeights = mutableMapOf<Int, Float>()
+                weightsArray.forEach { entry ->
+                    val parts = entry.split(":")
+                    if (parts.size == 2) {
+                        val key = parts[0].toIntOrNull()
+                        val value = parts[1].toFloatOrNull()
+                        if (key != null && value != null) {
+                            restoredWeights[key] = value
+                        }
+                    }
+                }
+                if (restoredWeights.isNotEmpty()) {
+                    currentWeights = restoredWeights
+                    // Показываем что веса восстановлены
+                    weightsInfo.text = "Веса восстановлены (${restoredWeights.size} чисел)"
+                }
+            }
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Перезапускаем только датчики (не камеру, она уже запущена)
+        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+            // Перезапускаем только магнитометр и микрофон
+            startMagnetometer()
+            startMicrophone()
         }
     }
 
@@ -267,8 +412,11 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
 
             } catch (e: Exception) {
                 outputText.text = "Ошибка: ${e.message}"
-                Toast.makeText(this@MainActivity, "Ошибка генерации", Toast.LENGTH_SHORT).show()
+                solarInfo.text = "Ошибка генерации"
+                Toast.makeText(this@MainActivity, "Ошибка: ${e.message}", Toast.LENGTH_SHORT).show()
+                e.printStackTrace()
             } finally {
+                // ВАЖНО: Всегда разблокируем кнопку
                 generateButton.isEnabled = true
             }
         }
@@ -323,7 +471,9 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
                     "Ошибка: ${e.message}",
                     Toast.LENGTH_SHORT
                 ).show()
+                e.printStackTrace()
             } finally {
+                // ВАЖНО: Всегда разблокируем кнопку
                 analyzeButton.isEnabled = true
             }
         }
@@ -357,26 +507,43 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
 
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
     private fun startMicrophone() {
+        // Если микрофон уже запущен, не запускаем снова
+        if (audioRecord != null && audioRecord?.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
+            return
+        }
+
         val sampleRate = 44100
         val bufferSize = AudioRecord.getMinBufferSize(
             sampleRate,
             AudioFormat.CHANNEL_IN_MONO,
             AudioFormat.ENCODING_PCM_16BIT
         )
-        audioRecord = AudioRecord(
-            MediaRecorder.AudioSource.MIC,
-            sampleRate,
-            AudioFormat.CHANNEL_IN_MONO,
-            AudioFormat.ENCODING_PCM_16BIT,
-            bufferSize
-        )
-        audioRecord?.startRecording()
-        thread {
-            val buffer = ByteArray(bufferSize)
-            while (true) {
-                audioRecord?.read(buffer, 0, bufferSize)
-                entropyBuffer.offer(buffer.copyOf())
+
+        try {
+            audioRecord = AudioRecord(
+                MediaRecorder.AudioSource.MIC,
+                sampleRate,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT,
+                bufferSize
+            )
+            audioRecord?.startRecording()
+
+            thread {
+                val buffer = ByteArray(bufferSize)
+                while (audioRecord?.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
+                    try {
+                        audioRecord?.read(buffer, 0, bufferSize)
+                        entropyBuffer.offer(buffer.copyOf())
+                    } catch (e: Exception) {
+                        // Ошибка чтения - выходим из цикла
+                        break
+                    }
+                }
             }
+        } catch (e: Exception) {
+            // Не удалось запустить микрофон - продолжаем без него
+            e.printStackTrace()
         }
     }
 
@@ -384,40 +551,79 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         val cameraId = "0"
         if (ActivityCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) return
 
-        cameraManager.openCamera(cameraId, object : CameraDevice.StateCallback() {
-            override fun onOpened(camera: CameraDevice) {
-                cameraDevice = camera
-                val characteristics = cameraManager.getCameraCharacteristics(cameraId)
-                val previewSize = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)!!
-                    .getOutputSizes(ImageFormat.YUV_420_888).first { it.width <= 320 && it.height <= 240 }
+        // Если камера уже открыта, не открываем снова
+        if (cameraDevice != null) return
 
-                imageReader = ImageReader.newInstance(previewSize.width, previewSize.height, ImageFormat.YUV_420_888, 2)
-                imageReader?.setOnImageAvailableListener({ reader ->
-                    val image = reader.acquireLatestImage()
-                    if (image != null) {
-                        val yPlane = image.planes[0]
-                        val bytes = ByteArray(yPlane.buffer.remaining())
-                        yPlane.buffer.get(bytes)
-                        entropyBuffer.offer(bytes)
-                        image.close()
+        try {
+            cameraManager.openCamera(cameraId, object : CameraDevice.StateCallback() {
+                override fun onOpened(camera: CameraDevice) {
+                    cameraDevice = camera
+
+                    try {
+                        val characteristics = cameraManager.getCameraCharacteristics(cameraId)
+                        val previewSize = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)!!
+                            .getOutputSizes(ImageFormat.YUV_420_888).first { it.width <= 320 && it.height <= 240 }
+
+                        imageReader = ImageReader.newInstance(previewSize.width, previewSize.height, ImageFormat.YUV_420_888, 2)
+                        imageReader?.setOnImageAvailableListener({ reader ->
+                            val image = reader.acquireLatestImage()
+                            if (image != null) {
+                                try {
+                                    val yPlane = image.planes[0]
+                                    val bytes = ByteArray(yPlane.buffer.remaining())
+                                    yPlane.buffer.get(bytes)
+                                    entropyBuffer.offer(bytes)
+                                } catch (e: Exception) {
+                                    // Игнорируем ошибки чтения
+                                } finally {
+                                    image.close()
+                                }
+                            }
+                        }, handler)
+
+                        val surfaces = listOf(imageReader!!.surface)
+
+                        camera.createCaptureSession(surfaces, object : CameraCaptureSession.StateCallback() {
+                            override fun onConfigured(session: CameraCaptureSession) {
+                                try {
+                                    // Проверяем что камера всё ещё жива
+                                    if (cameraDevice == null) return
+
+                                    val request = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
+                                    request.addTarget(imageReader!!.surface)
+                                    request.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
+                                    session.setRepeatingRequest(request.build(), null, handler)
+                                } catch (e: Exception) {
+                                    // Камера умерла - ничего не делаем
+                                    e.printStackTrace()
+                                }
+                            }
+                            override fun onConfigureFailed(session: CameraCaptureSession) {
+                                // Сессия не создана - ничего не делаем
+                            }
+                        }, handler)
+                    } catch (e: Exception) {
+                        // Ошибка при настройке камеры
+                        e.printStackTrace()
+                        cameraDevice?.close()
+                        cameraDevice = null
                     }
-                }, handler)
+                }
 
-                val surfaces = listOf(imageReader!!.surface)
+                override fun onDisconnected(camera: CameraDevice) {
+                    camera.close()
+                    cameraDevice = null
+                }
 
-                camera.createCaptureSession(surfaces, object : CameraCaptureSession.StateCallback() {
-                    override fun onConfigured(session: CameraCaptureSession) {
-                        val request = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
-                        request.addTarget(imageReader!!.surface)
-                        request.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
-                        session.setRepeatingRequest(request.build(), null, handler)
-                    }
-                    override fun onConfigureFailed(session: CameraCaptureSession) {}
-                }, handler)
-            }
-            override fun onDisconnected(camera: CameraDevice) {}
-            override fun onError(camera: CameraDevice, error: Int) {}
-        }, handler)
+                override fun onError(camera: CameraDevice, error: Int) {
+                    camera.close()
+                    cameraDevice = null
+                }
+            }, handler)
+        } catch (e: Exception) {
+            // Не удалось открыть камеру - продолжаем без неё
+            e.printStackTrace()
+        }
     }
 
     private suspend fun collectEntropy(): ByteArray = withContext(Dispatchers.IO) {
@@ -494,19 +700,45 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     // ===== Статистика =====
 
     private suspend fun updateStats() {
-        val stats = analyzer.getDatabaseStats()
-        statsInfo.text = "БД: ${stats.totalRecords} (${stats.lotteryRecords} тиражей, ${stats.generatedRecords} сгенерировано)"
+        val stats = withContext(Dispatchers.IO) {
+            analyzer.getDatabaseStats()
+        }
+        withContext(Dispatchers.Main) {
+            statsInfo.text = "БД: ${stats.totalRecords} (${stats.lotteryRecords} тиражей, ${stats.generatedRecords} сгенерировано)"
+        }
     }
 
     // ===== Lifecycle =====
 
     override fun onPause() {
         super.onPause()
+        // Останавливаем датчики
         sensorManager.unregisterListener(this)
-        audioRecord?.stop()
-        audioRecord?.release()
-        imageReader?.close()
-        cameraDevice?.close()
-        handlerThread.quitSafely()
+
+        // Останавливаем и освобождаем микрофон
+        try {
+            audioRecord?.stop()
+            audioRecord?.release()
+            audioRecord = null
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+
+        // НЕ закрываем камеру и handlerThread здесь!
+        // Они нужны для работы после onResume()
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        // Закрываем камеру и освобождаем ресурсы только при уничтожении
+        try {
+            imageReader?.close()
+            imageReader = null
+            cameraDevice?.close()
+            cameraDevice = null
+            handlerThread.quitSafely()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
     }
 }
