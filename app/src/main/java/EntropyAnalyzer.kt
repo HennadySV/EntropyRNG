@@ -2,10 +2,11 @@ package com.example.entropyrng.analysis
 
 import com.example.entropyrng.data.AppDatabase
 import com.example.entropyrng.data.Converters
+import com.example.entropyrng.data.NumberData
+import com.example.entropyrng.data.KpHistoryDao
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import kotlin.math.pow
-import kotlin.math.sqrt
+import kotlin.math.abs
 
 /**
  * Анализатор энтропии и исторических данных лотереи
@@ -128,7 +129,7 @@ class EntropyAnalyzer(private val db: AppDatabase) {
     }
 
     /**
-     * Расчёт корреляции с солнечной активностью (будущая реализация)
+     * Расчёт корреляции с солнечной активностью
      * Анализирует связь между Kp индексом и выпавшими числами
      */
     suspend fun analyzeSolarCorrelation(
@@ -252,7 +253,7 @@ class EntropyAnalyzer(private val db: AppDatabase) {
             // КЛЮЧЕВАЯ ФОРМУЛА:
             // Если текущий Kp близок к среднему Kp этого числа → увеличиваем вес
             // Используем обратную функцию расстояния
-            val kpDifference = kotlin.math.abs(currentKp - avgKpForNumber)
+            val kpDifference = abs(currentKp - avgKpForNumber)
             val maxDifference = 9.0f // Максимальный Kp = 9
 
             // Коэффициент близости: 1.0 (идеально близко) ... 0.0 (максимально далеко)
