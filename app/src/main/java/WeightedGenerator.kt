@@ -177,4 +177,145 @@ class WeightedGenerator {
         val uniformWeight = 1.0f / (max - min + 1)
         return (min..max).associateWith { uniformWeight }
     }
+
+    /**
+     * Генерация двух полей с вариативностью распределения
+     * Имитирует паттерн лотереи: поля могут отличаться по spread
+     *
+     * Статистика лотереи "Премьер":
+     * - Средняя разница spread между полями: 4.16
+     * - 6.6% тиражей имеют разницу ≥10 (одно кластер, другое размашистое)
+     *
+     * @return Pair(field1, field2) где каждое поле - отсортированный список из 4 чисел
+     */
+    fun generateTwoFieldsWithVariability(
+        entropyBytes: ByteArray,
+        kp: Float,
+        weights: Map<Int, Float>?,
+        mode: GenerationMode
+    ): Pair<List<Int>, List<Int>> {
+        // Генерируем первое поле
+        val field1 = when (mode) {
+            GenerationMode.PURE_ENTROPY ->
+                generatePureEntropy(4, 1, 20, entropyBytes, kp)
+            GenerationMode.WEIGHTED_ENTROPY ->
+                generateWeightedEntropy(4, 1, 20, entropyBytes, kp, weights!!)
+        }
+
+        // Генерируем второе поле
+        var field2 = when (mode) {
+            GenerationMode.PURE_ENTROPY ->
+                generatePureEntropy(4, 1, 20, entropyBytes, kp)
+            GenerationMode.WEIGHTED_ENTROPY ->
+                generateWeightedEntropy(4, 1, 20, entropyBytes, kp, weights!!)
+        }
+
+        // Вычисляем spread обоих полей
+        val spread1 = field1.max() - field1.min()
+        val spread2 = field2.max() - field2.min()
+        val spreadDiff = kotlin.math.abs(spread1 - spread2)
+
+        // Если разница слишком маленькая (< 3), добавляем вариативность
+        // Согласно статистике лотереи, средняя разница = 4.16
+        if (spreadDiff < 3) {
+            // Создаём seed из текущего времени для случайности
+            val seed = ByteBuffer.wrap(entropyBytes).getLong() xor System.nanoTime()
+            val random = Random(seed)
+
+            // 30% шанс перегенерировать второе поле для разнообразия
+            if (random.nextFloat() < 0.3f) {
+                // Модифицируем энтропию добавлением случайного шума
+                val noisyEntropy = entropyBytes.copyOf().apply {
+                    this[0] = (this[0].toInt() xor random.nextInt()).toByte()
+                }
+
+                field2 = when (mode) {
+                    GenerationMode.PURE_ENTROPY ->
+                        generatePureEntropy(4, 1, 20, noisyEntropy, kp)
+                    GenerationMode.WEIGHTED_ENTROPY ->
+                        generateWeightedEntropy(4, 1, 20, noisyEntropy, kp, weights!!)
+                }
+            }
+        }
+
+        // Дополнительно: в 6.6% случаев создаём экстремальную разницу (≥10)
+        // Это имитирует реальную лотерею
+        val seed = ByteBuffer.wrap(entropyBytes).getLong()
+        val random = Random(seed)
+
+        if (random.nextFloat() < 0.066f) {  // 6.6% случаев
+            // Решаем какое поле делать кластерным, а какое размашистым
+            val makeField2Extreme = random.nextBoolean()
+
+            if (makeField2Extreme) {
+                // Генерируем экстремально размашистое или кластерное поле 2
+                val targetSpread = if (random.nextBoolean()) {
+                    // Размашистое (spread 15-19)
+                    15 + random.nextInt(5)
+                } else {
+                    // Кластерное (spread 3-6)
+                    3 + random.nextInt(4)
+                }
+
+                // Генерируем поле с целевым spread
+                field2 = generateFieldWithTargetSpread(
+                    targetSpread = targetSpread,
+                    entropyBytes = entropyBytes,
+                    kp = kp,
+                    weights = weights,
+                    mode = mode,
+                    random = random
+                )
+            }
+        }
+
+        return Pair(field1, field2)
+    }
+
+    /**
+     * Генерирует поле с заданным целевым spread
+     * Используется для создания экстремальных комбинаций
+     */
+    private fun generateFieldWithTargetSpread(
+        targetSpread: Int,
+        entropyBytes: ByteArray,
+        kp: Float,
+        weights: Map<Int, Float>?,
+        mode: GenerationMode,
+        random: Random
+    ): List<Int> {
+        var attempts = 0
+        val maxAttempts = 50
+
+        while (attempts < maxAttempts) {
+            // Модифицируем энтропию для каждой попытки
+            val modifiedEntropy = entropyBytes.copyOf().apply {
+                this[attempts % this.size] = (this[attempts % this.size].toInt() xor random.nextInt()).toByte()
+            }
+
+            val field = when (mode) {
+                GenerationMode.PURE_ENTROPY ->
+                    generatePureEntropy(4, 1, 20, modifiedEntropy, kp)
+                GenerationMode.WEIGHTED_ENTROPY ->
+                    generateWeightedEntropy(4, 1, 20, modifiedEntropy, kp, weights!!)
+            }
+
+            val spread = field.max() - field.min()
+
+            // Проверяем близость к целевому spread (±2)
+            if (kotlin.math.abs(spread - targetSpread) <= 2) {
+                return field
+            }
+
+            attempts++
+        }
+
+        // Если не удалось достичь целевого spread, возвращаем лучшую попытку
+        return when (mode) {
+            GenerationMode.PURE_ENTROPY ->
+                generatePureEntropy(4, 1, 20, entropyBytes, kp)
+            GenerationMode.WEIGHTED_ENTROPY ->
+                generateWeightedEntropy(4, 1, 20, entropyBytes, kp, weights!!)
+        }
+    }
 }

@@ -384,31 +384,77 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
                 // Собрать энтропию
                 val entropyBytes = collectEntropy()
 
-                // Генерация в зависимости от режима
-                val numbers = if (modeSwitch.isChecked && currentWeights != null) {
-                    // Режим с весами + учёт Kp
-                    val kpAdjustedWeights = analyzer.calculateKpAdjustedWeights(
-                        min, validMax, kp
+                // Определяем режим генерации
+                val mode = if (modeSwitch.isChecked && currentWeights != null) {
+                    WeightedGenerator.GenerationMode.WEIGHTED_ENTROPY
+                } else {
+                    WeightedGenerator.GenerationMode.PURE_ENTROPY
+                }
+
+                // Проверяем: генерируем 2 поля по 4 числа (лотерея Премьер) или обычный режим?
+                val isPremierMode = (min == 1 && validMax == 20 && validCount == 8)
+
+                val numbers = if (isPremierMode) {
+                    // РЕЖИМ ПРЕМЬЕР: генерируем 2 поля по 4 числа с вариативностью
+                    val weights = if (mode == WeightedGenerator.GenerationMode.WEIGHTED_ENTROPY) {
+                        analyzer.calculateKpAdjustedWeights(min, validMax, kp)
+                    } else null
+
+                    val (field1, field2) = generator.generateTwoFieldsWithVariability(
+                        entropyBytes, kp, weights, mode
                     )
 
-                    generator.generateWeightedEntropy(
-                        validCount, min, validMax,
-                        entropyBytes, kp,
-                        kpAdjustedWeights
-                    )
+                    field1 + field2  // Объединяем оба поля
                 } else {
-                    // Режим чистой энтропии
-                    generator.generatePureEntropy(
-                        validCount, min, validMax, entropyBytes, kp
-                    )
+                    // ОБЫЧНЫЙ РЕЖИМ: генерируем как раньше
+                    if (mode == WeightedGenerator.GenerationMode.WEIGHTED_ENTROPY) {
+                        val kpAdjustedWeights = analyzer.calculateKpAdjustedWeights(
+                            min, validMax, kp
+                        )
+
+                        generator.generateWeightedEntropy(
+                            validCount, min, validMax,
+                            entropyBytes, kp,
+                            kpAdjustedWeights
+                        )
+                    } else {
+                        generator.generatePureEntropy(
+                            validCount, min, validMax, entropyBytes, kp
+                        )
+                    }
                 }
 
                 // Сохранить в БД
                 saveGenerated(numbers, min, validMax, kp)
 
-                // Показать результат
-                val mode = if (modeSwitch.isChecked) "Калиброванный" else "Чистая энтропия"
-                outputText.text = "[$mode]\nKp: $kp\n${numbers.joinToString(", ")}"
+                // Показать результат с красивым форматированием для Премьер
+                val modeStr = if (modeSwitch.isChecked) "Калиброванный" else "Чистая энтропия"
+
+                val outputStr = if (isPremierMode) {
+                    // Красивое отображение для 2 полей
+                    val field1 = numbers.take(4)
+                    val field2 = numbers.drop(4)
+                    val spread1 = field1.max() - field1.min()
+                    val spread2 = field2.max() - field2.min()
+                    val spreadDiff = kotlin.math.abs(spread1 - spread2)
+
+                    """
+                    [$modeStr] Kp: $kp
+                    
+                    Поле 1: ${field1.joinToString(", ")}
+                    spread: $spread1
+                    
+                    Поле 2: ${field2.joinToString(", ")}
+                    spread: $spread2
+                    
+                    Δ spread: $spreadDiff
+                    """.trimIndent()
+                } else {
+                    // Обычное отображение
+                    "[$modeStr]\nKp: $kp\n${numbers.joinToString(", ")}"
+                }
+
+                outputText.text = outputStr
 
             } catch (e: Exception) {
                 outputText.text = "Ошибка: ${e.message}"
