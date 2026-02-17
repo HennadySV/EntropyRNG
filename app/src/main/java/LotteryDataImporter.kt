@@ -13,235 +13,282 @@ import java.util.*
 
 /**
  * Импортер данных лотереи из CSV файлов
- * Поддерживает формат из NumberPredictionApp и lottery_stats.csv
+ *
+ * Поддерживаемый формат (results_all_clear):
+ *   008938,17 июля 2025,19:54 МСК,"8, 11, 13, 14","11, 1, 8, 10"
+ *
+ * Логика импорта:
+ *   - Парсит CSV с учётом кавычек (поля могут содержать запятые)
+ *   - Пропускает тираж если он уже есть И запись полная (8 чисел)
+ *   - Обновляет тираж если он есть, но запись неполная (< 8 чисел)
+ *   - Добавляет тираж если его нет совсем
  */
 class LotteryDataImporter(private val context: Context) {
 
     private val db = AppDatabase.getDatabase(context)
 
-    /**
-     * Импортировать данные из CSV файла
-     * @param uri URI файла, выбранного пользователем
-     * @return количество импортированных записей
-     */
+    // ─────────────────────────────────────────────────────────────
+    //  Публичный метод
+    // ─────────────────────────────────────────────────────────────
+
     suspend fun importFromCsv(uri: Uri): ImportResult = withContext(Dispatchers.IO) {
-        val dataList = mutableListOf<NumberData>()
-        var errorCount = 0
-        var lineNumber = 0
+        var added    = 0
+        var updated  = 0
+        var skipped  = 0
+        var errors   = 0
+        var lineNum  = 0
 
         try {
             context.contentResolver.openInputStream(uri)?.use { inputStream ->
                 BufferedReader(InputStreamReader(inputStream)).use { reader ->
-                    // Пропускаем заголовок
-                    reader.readLine()
-                    lineNumber++
 
-                    reader.forEachLine { line ->
-                        lineNumber++
-                        try {
-                            val data = parseCsvLine(line)
-                            if (data != null) {
-                                dataList.add(data)
+                    // Пропускаем заголовок если он есть
+                    val firstLine = reader.readLine() ?: return@use
+                    lineNum++
+
+                    // Определяем — заголовок это или данные
+                    val startLine = if (isHeaderLine(firstLine)) {
+                        reader.readLine()  // пропустили заголовок, читаем первую строку данных
+                    } else {
+                        firstLine          // заголовка нет — первая строка уже данные
+                    }
+
+                    var line: String? = startLine
+
+                    while (line != null) {
+                        lineNum++
+                        val trimmed = line.trim()
+
+                        if (trimmed.isNotEmpty()) {
+                            try {
+                                val parsed = parseLine(trimmed)
+
+                                if (parsed != null) {
+                                    val result = upsertDraw(parsed)
+                                    when (result) {
+                                        UpsertAction.ADDED   -> added++
+                                        UpsertAction.UPDATED -> updated++
+                                        UpsertAction.SKIPPED -> skipped++
+                                    }
+                                } else {
+                                    errors++
+                                }
+                            } catch (e: Exception) {
+                                errors++
                             }
-                        } catch (e: Exception) {
-                            errorCount++
-                            // Логируем ошибку, но продолжаем импорт
                         }
+
+                        line = reader.readLine()
                     }
                 }
             }
 
-            // Сохраняем в базу данных
-            if (dataList.isNotEmpty()) {
-                db.numberDataDao().insertAll(dataList)
-            }
-
             ImportResult(
-                success = true,
-                importedCount = dataList.size,
-                errorCount = errorCount,
-                message = "Импортировано ${dataList.size} записей"
+                success       = true,
+                addedCount    = added,
+                updatedCount  = updated,
+                skippedCount  = skipped,
+                errorCount    = errors,
+                message       = "Добавлено: $added | Обновлено: $updated | Пропущено: $skipped | Ошибок: $errors"
             )
 
         } catch (e: Exception) {
             ImportResult(
-                success = false,
-                importedCount = 0,
-                errorCount = errorCount,
-                message = "Ошибка импорта: ${e.message}"
+                success       = false,
+                addedCount    = added,
+                updatedCount  = updated,
+                skippedCount  = skipped,
+                errorCount    = errors,
+                message       = "Критическая ошибка: ${e.message}"
             )
         }
     }
 
-    /**
-     * Парсинг одной строки CSV
-     * Поддерживает два формата:
-     * 1. lottery_stats.csv: lottery,draw_number,draw_date_time,my_field1,my_field2,win_field1,win_field2,win_amount
-     * 2. NumberPredictionApp: id_тиража,дата,время,число1,число2,...
-     */
-    private fun parseCsvLine(line: String): NumberData? {
-        val columns = line.split(",").map { it.trim().replace("\"", "") }
+    // ─────────────────────────────────────────────────────────────
+    //  Upsert: добавить / обновить / пропустить
+    // ─────────────────────────────────────────────────────────────
 
-        if (columns.size < 3) return null
+    private suspend fun upsertDraw(parsed: NumberData): UpsertAction {
+        val existing = db.numberDataDao().getByIteration(parsed.iteration)
 
-        // Определяем формат
         return when {
-            // Формат lottery_stats.csv
-            columns.size >= 8 && columns[0].isNotEmpty() -> {
-                parseLotteryStatsFormat(columns)
+            // Записи нет — просто вставляем
+            existing == null -> {
+                db.numberDataDao().insert(parsed)
+                UpsertAction.ADDED
             }
-            // Формат NumberPredictionApp (минимум: тираж, дата, время + числа)
-            columns.size >= 5 -> {
-                parseNumberPredictionFormat(columns)
+
+            // Запись есть, но неполная (< 8 чисел) — обновляем
+            existing.numbers.size < 8 -> {
+                db.numberDataDao().insert(parsed.copy(id = existing.id))
+                UpsertAction.UPDATED
             }
-            else -> null
+
+            // Запись есть и полная — пропускаем
+            else -> UpsertAction.SKIPPED
         }
     }
 
+    // ─────────────────────────────────────────────────────────────
+    //  Парсинг строки CSV с учётом кавычек
+    // ─────────────────────────────────────────────────────────────
+
     /**
-     * Парсинг формата lottery_stats.csv
+     * Правильный CSV-парсер: понимает поля в кавычках с запятыми внутри.
+     *
+     * Пример:
+     *   008938,17 июля 2025,19:54 МСК,"8, 11, 13, 14","11, 1, 8, 10"
+     *   →  ["008938", "17 июля 2025", "19:54 МСК", "8, 11, 13, 14", "11, 1, 8, 10"]
      */
-    private fun parseLotteryStatsFormat(columns: List<String>): NumberData? {
-        try {
-            val lotteryType = columns[0]
-            val drawNumber = columns[1]
-            val dateTimeStr = columns[2]
+    private fun splitCsvLine(line: String): List<String> {
+        val result  = mutableListOf<String>()
+        val current = StringBuilder()
+        var inQuotes = false
 
-            // Парсинг даты и времени из формата "14 октября 2025 14:09 МСК"
-            val (date, time) = parseDateTimeRussian(dateTimeStr)
-
-            // Извлекаем числа из поля win_field1
-            val numbers = extractNumbersFromField(columns.getOrNull(5) ?: "")
-
-            if (numbers.isEmpty()) return null
-
-            return NumberData(
-                iteration = drawNumber,
-                date = date,
-                time = time,
-                numbers = numbers,
-                source = "imported",
-                lotteryType = lotteryType,
-                metadata = "Imported from lottery_stats.csv"
-            )
-        } catch (e: Exception) {
-            return null
+        for (ch in line) {
+            when {
+                ch == '"'  -> inQuotes = !inQuotes          // вход/выход из кавычек
+                ch == ',' && !inQuotes -> {                 // разделитель вне кавычек
+                    result.add(current.toString().trim())
+                    current.clear()
+                }
+                else -> current.append(ch)
+            }
         }
+        result.add(current.toString().trim())               // последнее поле
+        return result
     }
 
     /**
-     * Парсинг формата NumberPredictionApp
+     * Парсим строку в NumberData.
+     *
+     * Формат results_all_clear:
+     *   col0 = номер тиража   (008938)
+     *   col1 = дата           (17 июля 2025)
+     *   col2 = время          (19:54 МСК)
+     *   col3 = поле 1         (8, 11, 13, 14)   — кавычки уже сняты парсером
+     *   col4 = поле 2         (11, 1, 8, 10)
      */
-    private fun parseNumberPredictionFormat(columns: List<String>): NumberData? {
-        try {
-            val iteration = columns[0]
-            val date = columns[1]
-            val time = columns[2].replace(" МСК", "")
+    private fun parseLine(line: String): NumberData? {
+        val cols = splitCsvLine(line)
+        if (cols.size < 5) return null
 
-            // Все остальные колонки - это числа
-            val numbers = columns.subList(3, columns.size.coerceAtMost(11))
-                .mapNotNull { it.toIntOrNull() }
-                .filter { it > 0 }
+        val iteration = cols[0].trim()
+        if (iteration.isEmpty()) return null
 
-            if (numbers.isEmpty()) return null
+        val dateStr = cols[1].trim()
+        val timeStr = cols[2].trim().replace(" МСК", "").trim()
 
-            return NumberData(
-                iteration = iteration,
-                date = date,
-                time = time,
-                numbers = numbers,
-                source = "imported",
-                metadata = "Imported from NumberPredictionApp CSV"
-            )
-        } catch (e: Exception) {
-            return null
-        }
+        // Парсим числа из обоих полей
+        val field1 = parseNumberList(cols[3])
+        val field2 = parseNumberList(cols[4])
+
+        if (field1.isEmpty() && field2.isEmpty()) return null
+
+        val numbers = field1 + field2
+
+        // Дата → yyyy-MM-dd
+        val date = parseDateRussian(dateStr)
+        // Время → HH:mm:ss
+        val time = parseTime(timeStr)
+
+        return NumberData(
+            iteration   = iteration,
+            date        = date,
+            time        = time,
+            numbers     = numbers,
+            source      = "imported",
+            lotteryType = "Премьер",
+            metadata    = "Imported from results CSV"
+        )
     }
 
     /**
-     * Извлечь числа из строки формата "Номер билета:,1041 3111 0000 2131 1877,..."
+     * Парсит строку вида "8, 11, 13, 14" → listOf(8, 11, 13, 14)
      */
-    private fun extractNumbersFromField(field: String): List<Int> {
-        // Простейшее извлечение: берём все числа от 1 до 100
-        return field.split(",")
+    private fun parseNumberList(raw: String): List<Int> =
+        raw.split(",")
             .mapNotNull { it.trim().toIntOrNull() }
-            .filter { it in 1..100 }
-            .distinct()
-    }
+            .filter { it in 1..20 }
 
-    /**
-     * Парсинг русской даты "14 октября 2025 14:09 МСК"
-     * Возвращает пару (date: "yyyy-MM-dd", time: "HH:mm:ss")
-     */
-    private fun parseDateTimeRussian(dateTimeStr: String): Pair<String, String> {
-        try {
-            // Убираем " МСК"
-            val cleaned = dateTimeStr.replace(" МСК", "").trim()
+    // ─────────────────────────────────────────────────────────────
+    //  Дата / время
+    // ─────────────────────────────────────────────────────────────
 
-            // Разделяем на дату и время
-            val parts = cleaned.split(" ")
-            if (parts.size < 4) throw Exception("Invalid format")
-
-            val day = parts[0].toIntOrNull() ?: 1
-            val monthStr = parts[1]
-            val year = parts[2].toIntOrNull() ?: 2025
-            val timeStr = parts[3]
-
-            // Конвертация месяца
-            val month = russianMonthToNumber(monthStr)
-
-            // Форматируем дату
-            val date = String.format("%04d-%02d-%02d", year, month, day)
-
-            // Форматируем время
-            val timeParts = timeStr.split(":")
-            val time = if (timeParts.size >= 2) {
-                String.format("%02d:%02d:00",
-                    timeParts[0].toIntOrNull() ?: 0,
-                    timeParts[1].toIntOrNull() ?: 0
-                )
+    private fun parseDateRussian(dateStr: String): String {
+        return try {
+            val parts = dateStr.trim().split(" ")
+            // Ожидаем "17 июля 2025"
+            if (parts.size >= 3) {
+                val day   = parts[0].toIntOrNull() ?: 1
+                val month = russianMonthToNumber(parts[1])
+                val year  = parts[2].toIntOrNull() ?: 2025
+                String.format("%04d-%02d-%02d", year, month, day)
             } else {
-                "00:00:00"
+                dateStr  // вернём как есть если не распознали
             }
-
-            return Pair(date, time)
         } catch (e: Exception) {
-            // Fallback на текущую дату
-            val cal = Calendar.getInstance()
-            val dateFormat = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
-            val timeFormat = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
-            return Pair(dateFormat.format(cal.time), timeFormat.format(cal.time))
+            val fmt = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
+            fmt.format(Date())
         }
     }
+
+    private fun parseTime(timeStr: String): String {
+        return try {
+            val parts = timeStr.split(":")
+            if (parts.size >= 2) {
+                String.format(
+                    "%02d:%02d:00",
+                    parts[0].trim().toIntOrNull() ?: 0,
+                    parts[1].trim().toIntOrNull() ?: 0
+                )
+            } else "00:00:00"
+        } catch (e: Exception) {
+            "00:00:00"
+        }
+    }
+
+    private fun russianMonthToNumber(month: String): Int =
+        when (month.lowercase().trim()) {
+            "января"   -> 1
+            "февраля"  -> 2
+            "марта"    -> 3
+            "апреля"   -> 4
+            "мая"      -> 5
+            "июня"     -> 6
+            "июля"     -> 7
+            "августа"  -> 8
+            "сентября" -> 9
+            "октября"  -> 10
+            "ноября"   -> 11
+            "декабря"  -> 12
+            else       -> 1
+        }
+
+    // ─────────────────────────────────────────────────────────────
+    //  Вспомогательные
+    // ─────────────────────────────────────────────────────────────
 
     /**
-     * Конвертация русского названия месяца в номер
+     * Определяем является ли строка заголовком (не содержит числовой iteration)
      */
-    private fun russianMonthToNumber(month: String): Int {
-        return when (month.lowercase()) {
-            "января" -> 1
-            "февраля" -> 2
-            "марта" -> 3
-            "апреля" -> 4
-            "мая" -> 5
-            "июня" -> 6
-            "июля" -> 7
-            "августа" -> 8
-            "сентября" -> 9
-            "октября" -> 10
-            "ноября" -> 11
-            "декабря" -> 12
-            else -> 1
-        }
+    private fun isHeaderLine(line: String): Boolean {
+        val firstCol = line.split(",").firstOrNull()?.trim() ?: return true
+        return firstCol.toIntOrNull() == null && !firstCol.matches(Regex("\\d{6}"))
     }
+
+    private enum class UpsertAction { ADDED, UPDATED, SKIPPED }
 }
 
-/**
- * Результат импорта
- */
+// ─────────────────────────────────────────────────────────────────
+//  Результат импорта (расширенный)
+// ─────────────────────────────────────────────────────────────────
+
 data class ImportResult(
-    val success: Boolean,
-    val importedCount: Int,
-    val errorCount: Int,
-    val message: String
+    val success      : Boolean,
+    val addedCount   : Int,
+    val updatedCount : Int,
+    val skippedCount : Int,
+    val errorCount   : Int,
+    val message      : String
 )

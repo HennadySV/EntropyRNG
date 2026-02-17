@@ -88,34 +88,13 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
             lifecycleScope.launch {
                 try {
                     importButton.isEnabled = false
-                    Toast.makeText(this@MainActivity, "Импорт...", Toast.LENGTH_SHORT).show()
-
-                    // Проверяем текущее количество записей
-                    val currentCount = withContext(Dispatchers.IO) {
-                        db.numberDataDao().getCountBySource("imported")
-                    }
-
-                    if (currentCount > 0) {
-                        // Показываем диалог подтверждения
-                        val shouldProceed = withContext(Dispatchers.Main) {
-                            showImportConfirmationDialog(currentCount)
-                        }
-
-                        if (!shouldProceed) {
-                            // Пользователь отменил
-                            Toast.makeText(
-                                this@MainActivity,
-                                "Импорт отменён",
-                                Toast.LENGTH_SHORT
-                            ).show()
-                            importButton.isEnabled = true
-                            return@launch
-                        }
-                    }
+                    statsInfo.text = "Импорт..."
+                    Toast.makeText(this@MainActivity, "Импорт запущен...", Toast.LENGTH_SHORT).show()
 
                     val result = importer.importFromCsv(it)
 
                     if (result.success) {
+                        // Детальное сообщение: добавлено / обновлено / пропущено
                         Toast.makeText(
                             this@MainActivity,
                             "✓ ${result.message}",
@@ -142,28 +121,6 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
                     importButton.isEnabled = true
                 }
             }
-        }
-    }
-
-    private suspend fun showImportConfirmationDialog(currentCount: Int): Boolean {
-        return withContext(Dispatchers.Main) {
-            var result = false
-            val dialog = androidx.appcompat.app.AlertDialog.Builder(this@MainActivity)
-                .setTitle("Повторный импорт")
-                .setMessage("В базе уже есть $currentCount импортированных записей.\n\nЭто создаст дубликаты. Продолжить?")
-                .setPositiveButton("Да") { _, _ -> result = true }
-                .setNegativeButton("Отмена") { _, _ -> result = false }
-                .setCancelable(false)
-                .create()
-
-            dialog.show()
-
-            // Ждём пока диалог закроется
-            while (dialog.isShowing) {
-                kotlinx.coroutines.delay(100)
-            }
-
-            result
         }
     }
 

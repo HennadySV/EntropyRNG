@@ -105,4 +105,11 @@ interface NumberDataDao {
      */
     @Query("SELECT numbers FROM lottery_draws WHERE source IN ('lottery', 'imported')")
     suspend fun getAllNumbersForAnalysis(): List<String> // JSON строки
+
+    /**
+     * Найти запись по номеру тиража.
+     * Возвращает null если тираж не найден — используется для upsert логики.
+     */
+    @Query("SELECT * FROM lottery_draws WHERE iteration = :iteration LIMIT 1")
+    suspend fun getByIteration(iteration: String): NumberData?
 }
