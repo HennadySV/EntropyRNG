@@ -30,6 +30,7 @@ import com.example.entropyrng.data.KpIndexManager
 import com.example.entropyrng.data.KpResult
 import com.example.entropyrng.generation.WeightedGenerator
 import com.example.entropyrng.import.LotteryDataImporter
+import com.example.entropyrng.export.DatabaseExporter
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -59,6 +60,7 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     private lateinit var generator: WeightedGenerator
     private lateinit var importer: LotteryDataImporter
     private lateinit var kpManager: KpIndexManager
+    private lateinit var exporter: DatabaseExporter
 
     // ===== Кеш весов =====
     private var currentWeights: Map<Int, Float>? = null
@@ -71,6 +73,7 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     private lateinit var generateButton: Button
     private lateinit var importButton: Button
     private lateinit var analyzeButton: Button
+    private lateinit var exportButton: Button
     private lateinit var modeSwitch: Switch
     private lateinit var outputText: TextView
     private lateinit var weightsInfo: TextView
@@ -284,6 +287,7 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         generator = WeightedGenerator()
         importer = LotteryDataImporter(this)
         kpManager = KpIndexManager(this)
+        exporter = DatabaseExporter(this, db)
     }
 
     private fun initializeUI() {
@@ -296,6 +300,7 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         generateButton = findViewById(R.id.generateButton)
         importButton = findViewById(R.id.importButton)
         analyzeButton = findViewById(R.id.analyzeButton)
+        exportButton = findViewById(R.id.exportButton)
 
         // Переключатель режима
         modeSwitch = findViewById(R.id.modeSwitch)
@@ -310,6 +315,7 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         generateButton.setOnClickListener { onGenerateClick() }
         importButton.setOnClickListener { onImportClick() }
         analyzeButton.setOnClickListener { onAnalyzeClick() }
+        exportButton.setOnClickListener { onExportClick() }
 
         modeSwitch.setOnCheckedChangeListener { _, isChecked ->
             if (isChecked && currentWeights == null) {
@@ -751,6 +757,48 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         }
         withContext(Dispatchers.Main) {
             statsInfo.text = "БД: ${stats.totalRecords} (${stats.lotteryRecords} тиражей, ${stats.generatedRecords} сгенерировано)"
+        }
+    }
+
+    // ───────────────────────────────────────────────
+    //  EXPORT
+    // ───────────────────────────────────────────────
+
+    private fun onExportClick() {
+        exportButton.isEnabled = false
+        statsInfo.text = "Экспорт..."
+
+        lifecycleScope.launch {
+            try {
+                val result = exporter.exportAll()
+
+                if (result.success) {
+                    val fileList = result.filesWritten.joinToString("\n")
+                    Toast.makeText(
+                        this@MainActivity,
+                        "✅ Экспорт OK\n${result.rowsExported} строк\nПапка: Downloads",
+                        Toast.LENGTH_LONG
+                    ).show()
+                    statsInfo.text = "Экспорт: ${result.rowsExported} строк → Downloads"
+
+                    // Обновляем стату БД
+                    updateStats()
+                } else {
+                    Toast.makeText(
+                        this@MainActivity,
+                        "❌ Ошибка: ${result.errorMessage}",
+                        Toast.LENGTH_LONG
+                    ).show()
+                    statsInfo.text = "Ошибка экспорта"
+                }
+
+            } catch (e: Exception) {
+                Toast.makeText(this@MainActivity, "Ошибка: ${e.message}", Toast.LENGTH_SHORT).show()
+                statsInfo.text = "Ошибка экспорта"
+                e.printStackTrace()
+            } finally {
+                exportButton.isEnabled = true
+            }
         }
     }
 
