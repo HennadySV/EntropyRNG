@@ -44,7 +44,51 @@
             android:textSize="16sp"
             android:textStyle="bold"
             android:layout_marginBottom="8dp" />
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:layout_marginTop="16dp"
+            android:gravity="center">
 
+            <!-- Кнопка переключения режима генерации -->
+            <Button
+                android:id="@+id/modeToggleButton"
+                android:layout_width="0dp"
+                android:layout_height="56dp"
+                android:layout_weight="1"
+                android:layout_marginEnd="8dp"
+                android:text="🎲 Энтропия"
+                android:textSize="14sp"
+                android:backgroundTint="@android:color/holo_blue_bright"
+                android:textColor="@android:color/white" />
+
+            <!-- Информационная кнопка -->
+            <Button
+                android:id="@+id/modeInfoButton"
+                android:layout_width="56dp"
+                android:layout_height="56dp"
+                android:layout_marginStart="8dp"
+                android:text="ℹ️"
+                android:textSize="18sp"
+                android:backgroundTint="@android:color/darker_gray"
+                android:textColor="@android:color/white"
+                android:onClick="showModeInfo" />
+
+        </LinearLayout>
+
+        <!-- Описание текущего режима -->
+        <TextView
+            android:id="@+id/modeDescription"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="🎲 Режим: Чистая энтропия"
+            android:textSize="12sp"
+            android:textColor="@android:color/darker_gray"
+            android:gravity="center"
+            android:padding="8dp"
+            android:background="@android:color/transparent" />
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -209,6 +253,6 @@
             android:layout_width="1dp"
             android:layout_height="1dp"
             android:visibility="gone" />
-
     </LinearLayout>
+
 </ScrollView>

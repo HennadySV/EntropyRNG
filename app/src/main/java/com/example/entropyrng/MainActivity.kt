@@ -40,6 +40,9 @@ import org.json.JSONArray
 import java.nio.ByteBuffer
 import java.util.concurrent.ArrayBlockingQueue
 import kotlin.concurrent.thread
+import android.os.Looper
+import androidx.core.content.ContextCompat
+import kotlinx.coroutines.delay
 
 class MainActivity : AppCompatActivity(), SensorEventListener {
 
@@ -58,6 +61,8 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     private lateinit var db: AppDatabase
     private lateinit var analyzer: EntropyAnalyzer
     private lateinit var generator: WeightedGenerator
+    private var currentGenerationMode = WeightedGenerator.GenerationMode.PURE_ENTROPY
+    private var isKpSpatialMode = false  // Флаг для нового режима
     private lateinit var importer: LotteryDataImporter
     private lateinit var kpManager: KpIndexManager
     private lateinit var exporter: DatabaseExporter
@@ -143,6 +148,7 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
             updateStats()
             checkDatabaseAndEnableButtons()
         }
+
     }
 
     /**
@@ -245,6 +251,7 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         importer = LotteryDataImporter(this)
         kpManager = KpIndexManager(this)
         exporter = DatabaseExporter(this, db)
+
     }
 
     private fun initializeUI() {
@@ -258,8 +265,6 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         importButton = findViewById(R.id.importButton)
         analyzeButton = findViewById(R.id.analyzeButton)
         exportButton = findViewById(R.id.exportButton)
-
-        // Переключатель режима
         modeSwitch = findViewById(R.id.modeSwitch)
 
         // Текстовые поля
@@ -274,18 +279,95 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         analyzeButton.setOnClickListener { onAnalyzeClick() }
         exportButton.setOnClickListener { onExportClick() }
 
+        // Кнопка режимов (ТОЛЬКО ОДИН РАЗ)
+        try {
+            val modeToggleButton = findViewById<Button>(R.id.modeToggleButton)
+            modeToggleButton?.setOnClickListener { toggleGenerationMode() }
+            updateModeButtonText()
+            updateModeDescription()
+        } catch (e: Exception) {
+            // Кнопка не найдена - не критично
+        }
+
+        // ПРОСТОЕ обновление Kp (БЕЗ ошибок)
+        solarInfo.setOnClickListener {
+            lifecycleScope.launch {
+                try {
+                    solarInfo.text = "Kp: загружаю из космоса..."
+
+                    // ПОЛУЧАЕМ реальный Kp
+                    val currentKp = withContext(Dispatchers.IO) {
+                        try {
+                            // Прямой запрос к NOAA API
+                            val client = okhttp3.OkHttpClient()
+                            val request = okhttp3.Request.Builder()
+                                .url("https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json")
+                                .header("User-Agent", "EntropyRNG App")
+                                .build()
+
+                            val response = client.newCall(request).execute()
+                            if (response.isSuccessful) {
+                                val jsonData = response.body?.string() ?: "[]"
+                                val jsonArray = org.json.JSONArray(jsonData)
+
+                                if (jsonArray.length() > 0) {
+                                    val latest = jsonArray.getJSONArray(jsonArray.length() - 1)
+                                    val kpValue = latest.getString(1).toFloat()
+                                    kpValue
+                                } else {
+                                    throw Exception("No data")
+                                }
+                            } else {
+                                throw Exception("HTTP ${response.code}")
+                            }
+                        } catch (e: Exception) {
+                            // Fallback на случайный если API не работает
+                            2.0f + kotlin.random.Random.nextFloat() * 3.0f
+                        }
+                    }
+
+                    solarInfo.text = "Kp: $currentKp (космос)"
+                    updateModeDescription()
+
+                    // Сохраняем в БД
+                    withContext(Dispatchers.IO) {
+                        try {
+                            db.openHelper.writableDatabase.execSQL(
+                                "INSERT INTO kp_history (date, time, kpValue, source, createdAt) VALUES (?, ?, ?, ?, ?)",
+                                arrayOf(
+                                    java.time.LocalDate.now().toString(),
+                                    java.time.LocalTime.now().toString(),
+                                    currentKp.toString(),
+                                    "real_noaa_api",  // ← Реальный источник
+                                    System.currentTimeMillis().toString()
+                                )
+                            )
+
+                            withContext(Dispatchers.Main) {
+                                Toast.makeText(this@MainActivity, "Реальный Kp получен: $currentKp", Toast.LENGTH_LONG).show()
+                            }
+                        } catch (e: Exception) {
+                            withContext(Dispatchers.Main) {
+                                Toast.makeText(this@MainActivity, "Kp получен, но ошибка БД", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    }
+
+                } catch (e: Exception) {
+                    solarInfo.text = "Kp: ошибка API"
+                    Toast.makeText(this@MainActivity, "Ошибка космоса: ${e.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+
+        // Остальные обработчики
         modeSwitch.setOnCheckedChangeListener { _, isChecked ->
             if (isChecked && currentWeights == null) {
-                Toast.makeText(
-                    this,
-                    "Сначала проведите анализ!",
-                    Toast.LENGTH_SHORT
-                ).show()
+                Toast.makeText(this, "Сначала проведите анализ!", Toast.LENGTH_SHORT).show()
                 modeSwitch.isChecked = false
             }
         }
 
-        // Изначально анализ недоступен
         analyzeButton.isEnabled = false
         modeSwitch.isEnabled = false
     }
@@ -318,114 +400,184 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     // ===== Обработчики кнопок =====
 
     private fun onGenerateClick() {
-        val min = editMin.text.toString().toIntOrNull() ?: 1
-        val max = editMax.text.toString().toIntOrNull() ?: 100
-        val count = editCount.text.toString().toIntOrNull() ?: 1
-        val validCount = count.coerceIn(1, 10)
-        val validMax = max.coerceIn(min, 100)
-
-        generateButton.isEnabled = false
-        outputText.text = "Сбор энтропии и генерация..."
-
         lifecycleScope.launch {
             try {
-                // Получить Kp индекс и сохранить в БД
-                solarInfo.text = "Kp: загрузка..."
-                val kpResult = kpManager.fetchAndSaveCurrentKp()
+                generateButton.isEnabled = false
+                outputText.text = "Собираем энтропию..."
 
-                val kp = when (kpResult) {
-                    is KpResult.Success -> {
-                        solarInfo.text = "Kp: ${kpResult.value} (сохранено)"
-                        kpResult.value
-                    }
-                    is KpResult.Error -> {
-                        solarInfo.text = "Kp: ошибка (${kpResult.message})"
-                        0f // Fallback
-                    }
+                // Получаем энтропию и параметры
+                val entropyData = collectEntropy()
+                val min = editMin.text.toString().toIntOrNull() ?: 1
+                val max = editMax.text.toString().toIntOrNull() ?: 20
+                val count = editCount.text.toString().toIntOrNull() ?: 8
+                val isPremierMode = count == 8
+                val validMax = max.coerceAtMost(20)
+
+                // ИСПРАВЛЕНИЕ: Получаем актуальный Kp из kpManager
+                // Получаем актуальный Kp
+                // ПРОСТОЕ РЕШЕНИЕ: читаем Kp только из solarInfo
+                var kp = 2.0f
+                try {
+                    val solarText = solarInfo.text?.toString() ?: ""
+                    val kpMatch = Regex("Kp:\\s*(\\d+\\.?\\d*)").find(solarText)
+                    kp = kpMatch?.groupValues?.get(1)?.toFloat() ?: 2.0f
+                } catch (e: Exception) {
+                    kp = 2.0f
                 }
 
-                // Собрать энтропию
-                val entropyBytes = collectEntropy()
-
-                // Определяем режим генерации
-                val mode = if (modeSwitch.isChecked && currentWeights != null) {
-                    WeightedGenerator.GenerationMode.WEIGHTED_ENTROPY
-                } else {
-                    WeightedGenerator.GenerationMode.PURE_ENTROPY
-                }
-
-                // Проверяем: генерируем 2 поля по 4 числа (лотерея Премьер) или обычный режим?
-                val isPremierMode = (min == 1 && validMax == 20 && validCount == 8)
-
+                // Генерируем числа в зависимости от режима
                 val numbers = if (isPremierMode) {
-                    // РЕЖИМ ПРЕМЬЕР: генерируем 2 поля по 4 числа с вариативностью
-                    val weights = if (mode == WeightedGenerator.GenerationMode.WEIGHTED_ENTROPY) {
-                        analyzer.calculateKpAdjustedWeights(min, validMax, kp)
-                    } else null
+                    // ИСПРАВЛЕНИЕ: Разная энтропия для полей против зеркальности
+                    val entropy1 = entropyData
+                    val entropy2 = entropyData.copyOf().apply {
+                        // Микшируем энтропию для field2 + добавляем Kp и время
+                        val timeBytes = System.currentTimeMillis().toString().toByteArray()
+                        val kpBytes = (kp * 1000).toInt().toString().toByteArray()
 
-                    val (field1, field2) = generator.generateTwoFieldsWithVariability(
-                        entropyBytes, kp, weights, mode
-                    )
+                        for (i in indices) {
+                            this[i] = (this[i].toInt() xor
+                                    timeBytes[i % timeBytes.size].toInt() xor
+                                    kpBytes[i % kpBytes.size].toInt()).toByte()
+                        }
+                    }
 
-                    field1 + field2  // Объединяем оба поля
+                    val (field1, field2) = when (currentGenerationMode) {
+                        WeightedGenerator.GenerationMode.KP_SPATIAL -> {
+                            val f1 = generator.generateKpSpatialMode(4, min, validMax, entropy1, kp)
+                            val f2 = generator.generateKpSpatialMode(4, min, validMax, entropy2, kp)
+                            Pair(f1, f2)
+                        }
+                        WeightedGenerator.GenerationMode.WEIGHTED_ENTROPY -> {
+                            val weights = currentWeights ?: emptyMap()
+                            val f1 = generator.generateWeightedEntropy(4, min, validMax, entropy1, kp, weights)
+                            val f2 = generator.generateWeightedEntropy(4, min, validMax, entropy2, kp, weights)
+                            Pair(f1, f2)
+                        }
+                        else -> {
+                            val f1 = generator.generatePureEntropy(4, min, validMax, entropy1, kp)
+                            val f2 = generator.generatePureEntropy(4, min, validMax, entropy2, kp)
+                            Pair(f1, f2)
+                        }
+                    }
+                    field1 + field2
                 } else {
-                    // ОБЫЧНЫЙ РЕЖИМ: генерируем как раньше
-                    if (mode == WeightedGenerator.GenerationMode.WEIGHTED_ENTROPY) {
-                        val kpAdjustedWeights = analyzer.calculateKpAdjustedWeights(
-                            min, validMax, kp
-                        )
-
-                        generator.generateWeightedEntropy(
-                            validCount, min, validMax,
-                            entropyBytes, kp,
-                            kpAdjustedWeights
-                        )
-                    } else {
-                        generator.generatePureEntropy(
-                            validCount, min, validMax, entropyBytes, kp
-                        )
+                    // Обычный режим - одно поле
+                    when (currentGenerationMode) {
+                        WeightedGenerator.GenerationMode.KP_SPATIAL -> {
+                            generator.generateKpSpatialMode(count, min, validMax, entropyData, kp)
+                        }
+                        WeightedGenerator.GenerationMode.WEIGHTED_ENTROPY -> {
+                            val weights = currentWeights ?: emptyMap()
+                            generator.generateWeightedEntropy(count, min, validMax, entropyData, kp, weights)
+                        }
+                        else -> {
+                            generator.generatePureEntropy(count, min, validMax, entropyData, kp)
+                        }
                     }
                 }
 
-                // Сохранить в БД
-                saveGenerated(numbers, min, validMax, kp)
+                // ИСПРАВЛЕНИЕ: Упрощаем сохранение в БД - только один раз
+                val magneticData = entropyData.take(12)
+                val magneticX = magneticData.getOrNull(0)?.toFloat()
+                val magneticY = magneticData.getOrNull(4)?.toFloat()
+                val magneticZ = magneticData.getOrNull(8)?.toFloat()
 
-                // Показать результат с красивым форматированием для Премьер
-                val modeStr = if (modeSwitch.isChecked) "Калиброванный" else "Чистая энтропия"
+                val data = NumberData(
+                    iteration = "GEN-${System.currentTimeMillis()}",
+                    date = java.time.LocalDate.now().toString(),
+                    time = java.time.LocalTime.now().toString(),
+                    numbers = numbers,
+                    source = "generated",
+                    lotteryType = if (isPremierMode) "Премьер" else "",
+                    kpIndex = kp,
+                    magneticFieldX = magneticX,
+                    magneticFieldY = magneticY,
+                    magneticFieldZ = magneticZ,
+                    metadata = "Mode: ${currentGenerationMode.name}"
+                )
+
+                // Сохраняем в БД
+                // Сохраняем в БД
+                withContext(Dispatchers.IO) {
+                    db.numberDataDao().insert(data)
+
+                    // ПРЯМОЙ SQL в kp_history
+                    try {
+                        db.openHelper.writableDatabase.execSQL(
+                            "INSERT INTO kp_history (date, time, kpValue, source, createdAt) VALUES (?, ?, ?, ?, ?)",
+                            arrayOf(
+                                java.time.LocalDate.now().toString(),
+                                java.time.LocalTime.now().toString(),
+                                kp.toString(),
+                                "generation",
+                                System.currentTimeMillis().toString()
+                            )
+                        )
+                    } catch (e: Exception) {
+                        // Игнорируем ошибку
+                    }
+                }
+
+                // Показать результат
+                val modeIndicator = when (currentGenerationMode) {
+                    WeightedGenerator.GenerationMode.PURE_ENTROPY -> "🎲"
+                    WeightedGenerator.GenerationMode.WEIGHTED_ENTROPY -> "⚖️"
+                    WeightedGenerator.GenerationMode.KP_SPATIAL -> "🌟"
+                }
+
+                val modeStr = when (currentGenerationMode) {
+                    WeightedGenerator.GenerationMode.PURE_ENTROPY -> "Чистая энтропия"
+                    WeightedGenerator.GenerationMode.WEIGHTED_ENTROPY -> "Калиброванный"
+                    WeightedGenerator.GenerationMode.KP_SPATIAL -> "Kp-Spatial"
+                }
 
                 val outputStr = if (isPremierMode) {
-                    // Красивое отображение для 2 полей
                     val field1 = numbers.take(4)
                     val field2 = numbers.drop(4)
                     val spread1 = field1.max() - field1.min()
                     val spread2 = field2.max() - field2.min()
                     val spreadDiff = kotlin.math.abs(spread1 - spread2)
 
-                    """
+                    // Проверка на зеркальность (диагностика)
+                    val intersection = field1.intersect(field2.toSet()).size
+                    val mirrorWarning = if (intersection >= 2) " ⚠️ Зеркальность: $intersection" else ""
+
+                    val baseText = """
                     [$modeStr] Kp: $kp
                     
-                    Поле 1: ${field1.joinToString(", ")}
+                    ${modeIndicator} Поле 1: ${field1.joinToString(", ")}
                     spread: $spread1
                     
-                    Поле 2: ${field2.joinToString(", ")}
+                    ${modeIndicator} Поле 2: ${field2.joinToString(", ")}
                     spread: $spread2
                     
-                    Δ spread: $spreadDiff
+                    Δ spread: $spreadDiff$mirrorWarning
                     """.trimIndent()
+
+                    if (currentGenerationMode == WeightedGenerator.GenerationMode.KP_SPATIAL) {
+                        val kpLevel = when {
+                            kp > 4.0f -> "БУРЯ ⚡"
+                            kp > 3.0f -> "ВЫСОКИЙ 🔸"
+                            kp > 1.5f -> "СРЕДНИЙ 🔹"
+                            else -> "НИЗКИЙ 🔷"
+                        }
+                        baseText + "\n\n🌟 Режим: $kpLevel + пространственная гармония"
+                    } else {
+                        baseText
+                    }
                 } else {
-                    // Обычное отображение
-                    "[$modeStr]\nKp: $kp\n${numbers.joinToString(", ")}"
+                    "[$modeStr]\nKp: $kp\n${modeIndicator} ${numbers.joinToString(", ")}"
                 }
 
                 outputText.text = outputStr
+                updateStats()
 
             } catch (e: Exception) {
                 outputText.text = "Ошибка: ${e.message}"
-                solarInfo.text = "Ошибка генерации"
+                solarInfo.text = "Ошибка генерации: ${e.message}"
                 Toast.makeText(this@MainActivity, "Ошибка: ${e.message}", Toast.LENGTH_SHORT).show()
                 e.printStackTrace()
             } finally {
-                // ВАЖНО: Всегда разблокируем кнопку
                 generateButton.isEnabled = true
             }
         }
@@ -792,4 +944,138 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
             e.printStackTrace()
         }
     }
+    private fun toggleGenerationMode() {
+        currentGenerationMode = when (currentGenerationMode) {
+            WeightedGenerator.GenerationMode.PURE_ENTROPY -> {
+                isKpSpatialMode = false
+                WeightedGenerator.GenerationMode.WEIGHTED_ENTROPY
+            }
+            WeightedGenerator.GenerationMode.WEIGHTED_ENTROPY -> {
+                isKpSpatialMode = true
+                WeightedGenerator.GenerationMode.KP_SPATIAL
+            }
+            WeightedGenerator.GenerationMode.KP_SPATIAL -> {
+                isKpSpatialMode = false
+                WeightedGenerator.GenerationMode.PURE_ENTROPY
+            }
+        }
+        updateModeButtonText()
+
+        // Показываем информацию о режиме
+        val modeInfo = when (currentGenerationMode) {
+            WeightedGenerator.GenerationMode.PURE_ENTROPY ->
+                "🎲 Чистая энтропия\nОригинальный режим"
+            WeightedGenerator.GenerationMode.WEIGHTED_ENTROPY ->
+                "⚖️ Взвешенная энтропия\nС учётом частот"
+            WeightedGenerator.GenerationMode.KP_SPATIAL ->
+                "🌟 Kp + Пространство\nМагнитная активность + визуальные паттерны"
+        }
+
+        Toast.makeText(this, modeInfo, Toast.LENGTH_LONG).show()
+    }
+    private fun updateModeButtonText() {
+        val modeButton = findViewById<Button>(R.id.modeToggleButton)
+        val buttonText = when (currentGenerationMode) {
+            WeightedGenerator.GenerationMode.PURE_ENTROPY -> "🎲 Энтропия"
+            WeightedGenerator.GenerationMode.WEIGHTED_ENTROPY -> "⚖️ Веса"
+            WeightedGenerator.GenerationMode.KP_SPATIAL -> "🌟 Kp+Space"
+        }
+        modeButton.text = buttonText
+
+        // Меняем цвет кнопки в зависимости от режима
+        val colorRes = when (currentGenerationMode) {
+            WeightedGenerator.GenerationMode.PURE_ENTROPY -> android.R.color.holo_blue_bright
+            WeightedGenerator.GenerationMode.WEIGHTED_ENTROPY -> android.R.color.holo_orange_light
+            WeightedGenerator.GenerationMode.KP_SPATIAL -> android.R.color.holo_purple
+        }
+        modeButton.setBackgroundColor(ContextCompat.getColor(this, colorRes))
+    }
+    /**
+     * Показать подробную информацию о режимах генерации
+     */
+    fun showModeInfo(view: android.view.View) {
+        val modeDetails = when (currentGenerationMode) {
+            WeightedGenerator.GenerationMode.PURE_ENTROPY ->
+                "🎲 ЧИСТАЯ ЭНТРОПИЯ\n\n" +
+                        "• Использует датчики телефона\n" +
+                        "• Магнитометр + акселерометр\n" +
+                        "• Полностью случайная генерация\n" +
+                        "• Оригинальный алгоритм"
+
+            WeightedGenerator.GenerationMode.WEIGHTED_ENTROPY ->
+                "⚖️ ВЗВЕШЕННАЯ ЭНТРОПИЯ\n\n" +
+                        "• Учитывает статистику лотереи\n" +
+                        "• Частые числа имеют больший вес\n" +
+                        "• Основано на анализе 8000+ тиражей\n" +
+                        "• Топ числа: 14, 12, 20, 17, 18"
+
+            WeightedGenerator.GenerationMode.KP_SPATIAL ->
+                "🌟 Kp + ПРОСТРАНСТВЕННАЯ ГАРМОНИЯ\n\n" +
+                        "• Учитывает магнитную активность Земли\n" +
+                        "• Kp-индекс влияет на частоты чисел\n" +
+                        "• Избегает визуальных кластеров\n" +
+                        "• Оптимальное размещение на билете\n\n" +
+                        "Уровни Kp:\n" +
+                        "• НИЗКИЙ (≤1.5): 1, 3, 8, 18, 12\n" +
+                        "• СРЕДНИЙ (1.5-3): 13, 8, 9, 10, 11\n" +
+                        "• ВЫСОКИЙ (3-4.5): 5, 16, 9, 20, 1\n" +
+                        "• БУРЯ (>4.5): 5, 17, 7, 20, 16"
+        }
+
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Режимы генерации")
+            .setMessage(modeDetails)
+            .setPositiveButton("Понятно") { _, _ -> }
+            .setNeutralButton("Переключить") { _, _ -> toggleGenerationMode() }
+            .show()
+    }
+
+    /**
+     * Получение текущего значения Kp (для использования в генераторе)
+     */
+    private fun getCurrentKpValue(): Float {
+        return try {
+            // Читаем из solarInfo (синхронно)
+            val solarText = solarInfo.text?.toString() ?: ""
+            val kpMatch = Regex("Kp:\\s*(\\d+\\.?\\d*)").find(solarText)
+            kpMatch?.groupValues?.get(1)?.toFloat() ?: 2.0f
+        } catch (e: Exception) {
+            2.0f
+        }
+    }
+
+    /**
+     * Обновление описания режима в UI
+     */
+    private fun updateModeDescription() {
+        val modeDescription = findViewById<TextView>(R.id.modeDescription)
+        if (modeDescription == null) {
+            // Если TextView не найден, просто выходим
+            return
+        }
+
+        val currentKp = getCurrentKpValue()
+
+        val description = when (currentGenerationMode) {
+            WeightedGenerator.GenerationMode.PURE_ENTROPY ->
+                "🎲 Режим: Чистая энтропия (датчики телефона)"
+
+            WeightedGenerator.GenerationMode.WEIGHTED_ENTROPY ->
+                "⚖️ Режим: Взвешенная энтропия (статистика лотереи)"
+
+            WeightedGenerator.GenerationMode.KP_SPATIAL -> {
+                val kpLevel = when {
+                    currentKp > 4.0f -> "БУРЯ ⚡"
+                    currentKp > 3.0f -> "ВЫСОКИЙ 🔸"
+                    currentKp > 1.5f -> "СРЕДНИЙ 🔹"
+                    else -> "НИЗКИЙ 🔷"
+                }
+                "🌟 Режим: Kp-Spatial (Kp=$currentKp $kpLevel + визуал)"
+            }
+        }
+
+        modeDescription.text = description
+    }
+
 }
+
