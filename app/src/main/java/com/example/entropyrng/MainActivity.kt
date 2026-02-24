@@ -424,6 +424,16 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
                 } catch (e: Exception) {
                     kp = 2.0f
                 }
+                val isDeadZone = kp in 3.0f..4.0f
+                val kpZoneInfo = when {
+                    kp <= 2.0f -> "🔷 ШТИЛЬ"
+                    kp in 2.0f..3.0f -> "🔹 НОРМА"
+                    kp in 3.0f..4.0f -> "⚠️ МЕРТВАЯ ЗОНА"
+                    else -> "⚡ БУРЯ"
+                }
+                if (isDeadZone && currentGenerationMode == WeightedGenerator.GenerationMode.KP_SPATIAL) {
+                    outputText.text = "⚠️ Обнаружена мертвая зона!\nКомпенсируем предохранители TRNG..."
+                }
 
                 // Генерируем числа в зависимости от режима
                 val numbers = if (isPremierMode) {
@@ -561,11 +571,19 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
                             kp > 1.5f -> "СРЕДНИЙ 🔹"
                             else -> "НИЗКИЙ 🔷"
                         }
-                        baseText + "\n\n🌟 Режим: $kpLevel + пространственная гармония"
+
+                        val correctionInfo = if (isDeadZone) {
+                            "\n🛠️ КОРРЕКЦИЯ активна"
+                        } else {
+                            ""
+                        }
+
+                        baseText + "\n\n🌟 Режим: $kpLevel ($kpZoneInfo)" + correctionInfo
                     } else {
                         baseText
                     }
                 } else {
+                    // Обычный режим (не Премьер)
                     "[$modeStr]\nKp: $kp\n${modeIndicator} ${numbers.joinToString(", ")}"
                 }
 

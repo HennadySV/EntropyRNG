@@ -342,7 +342,10 @@ class WeightedGenerator {
         weights: Map<Int, Float>? = null,
         mode: GenerationMode = GenerationMode.PURE_ENTROPY
     ): Pair<List<Int>, List<Int>> {
-
+        // СПЕЦИАЛЬНАЯ ЛОГИКА ДЛЯ МЕРТВОЙ ЗОНЫ
+        if (kp in 3.0f..4.0f && mode == GenerationMode.KP_SPATIAL) {
+            return generateDeadZoneFields(entropyBytes, kp)
+        }
         val random = Random(System.currentTimeMillis())
         val targetSpread = random.nextInt(10) + 8 // 8-17
         var attempts = 0
@@ -427,6 +430,187 @@ class WeightedGenerator {
             GenerationMode.PURE_ENTROPY -> generatePureEntropy(4, 1, 20, entropy2, kp)
             GenerationMode.WEIGHTED_ENTROPY -> generateWeightedEntropy(4, 1, 20, entropy2, kp, weights!!)
             GenerationMode.KP_SPATIAL -> generateKpSpatialMode(4, 1, 20, entropy2, kp)
+        }
+
+        return Pair(field1, field2)
+    }
+    /**
+     * Вычисляет штраф за последовательные числа
+     */
+    private fun calculateSequentialPenalty(numbers: List<Int>): Float {
+        val sorted = numbers.sorted()
+        var penalty = 0f
+
+        for (i in 0 until sorted.size - 1) {
+            if (sorted[i + 1] - sorted[i] == 1) {
+                penalty += 10f  // Штраф за каждую последовательную пару
+            }
+        }
+
+        return penalty
+    }
+
+    /**
+     * Специальная генерация для "мертвой зоны" Kp 3.0-4.0
+     * Компенсирует интенсивность работы предохранителей TRNG
+     */
+    fun generateDeadZoneCorrected(
+        count: Int,
+        min: Int,
+        max: Int,
+        entropyBytes: ByteArray,
+        kp: Float
+    ): List<Int> {
+
+        // ПАТОЛОГИЧЕСКИЕ АТТРАКТОРЫ В МЕРТВОЙ ЗОНЕ (подавляем их)
+        val deadZoneAttractors = mapOf(
+            5 to 0.3f,   // Снижаем с 10.4% до нормы
+            16 to 0.3f,  // Снижаем с 9.9% до нормы
+            9 to 0.3f,   // Снижаем с 9.4% до нормы
+            13 to 0.5f   // Снижаем с 7.2% до нормы
+        )
+
+        // ЧИСЛА-СПАСИТЕЛИ (усиливаем недостающие)
+        val rescueNumbers = mapOf(
+            18 to 2.0f,  // Поднимаем с 3.3% до нормы
+            11 to 2.0f,  // Поднимаем с 3.0% до нормы
+            7 to 2.0f,   // Поднимаем с 3.8% до нормы
+            15 to 1.8f,  // Поднимаем с 3.3% до нормы
+            19 to 1.5f   // Поднимаем с 3.0% до нормы
+        )
+
+        val results = mutableListOf<Int>()
+
+        // Более агрессивное смешивание entropy для мертвой зоны
+        val entropyHash = MessageDigest.getInstance("SHA-256").digest(
+            entropyBytes +
+                    System.nanoTime().toString().toByteArray() +
+                    "DEAD_ZONE_CORRECTION".toByteArray() +
+                    (kp * 10000).toInt().toString().toByteArray()
+        )
+        val seed = ByteBuffer.wrap(entropyHash).long
+        val random = Random(seed)
+
+        // Базовые веса с коррекцией
+        val correctedWeights = (min..max).associateWith { num ->
+            var weight = 1.0f  // Базовый вес
+
+            // Применяем штрафы для аттракторов
+            if (deadZoneAttractors.containsKey(num)) {
+                weight *= deadZoneAttractors[num]!!
+            }
+
+            // Применяем бонусы для спасительных чисел
+            if (rescueNumbers.containsKey(num)) {
+                weight *= rescueNumbers[num]!!
+            }
+
+            weight
+        }.toMutableMap()
+
+        repeat(count) {
+            var bestCandidate = min
+            var bestScore = Float.NEGATIVE_INFINITY
+
+            // Увеличиваем количество попыток для лучшего качества
+            repeat(50) { attempt ->
+                val candidates = correctedWeights.keys.filter { it !in results }
+                if (candidates.isEmpty()) return@repeat
+
+                // Взвешенный выбор с дополнительной случайностью
+                val candidate = if (random.nextFloat() < 0.8f) {
+                    // 80% - взвешенный выбор с коррекцией
+                    val totalWeight = candidates.sumOf { correctedWeights[it]!!.toDouble() }
+                    var randomValue = random.nextDouble() * totalWeight
+
+                    var selected = candidates.first()
+                    for (num in candidates) {
+                        randomValue -= correctedWeights[num]!!
+                        if (randomValue <= 0) {
+                            selected = num
+                            break
+                        }
+                    }
+                    selected
+                } else {
+                    // 20% - чисто случайный для разнообразия
+                    candidates.random(random)
+                }
+
+                // Оценка кандидата с учетом анти-паттернов мертвой зоны
+                val testField = results + candidate
+
+                // СПЕЦИАЛЬНЫЕ ШТРАФЫ ДЛЯ МЕРТВОЙ ЗОНЫ:
+
+                // 1. Штраф за аттракторы мертвой зоны
+                val attractorPenalty = if (deadZoneAttractors.containsKey(candidate)) 20f else 0f
+
+                // 2. Бонус за спасительные числа
+                val rescueBonus = rescueNumbers[candidate]?.let { it * 15f } ?: 0f
+
+                // 3. Анти-кластерный штраф (мертвая зона склонна к кластерам)
+                val clusterPenalty = calculateSpatialPenalty(testField) * 1.5f
+
+                // 4. Штраф за последовательности (1.86 в среднем в мертвой зоне)
+                val sequentialPenalty = calculateSequentialPenalty(testField) * 10f
+
+                // 5. Бонус за spread отличный от 7.0 (средний в мертвой зоне)
+                val spreadBonus = if (testField.size >= 4) {
+                    val spread = testField.max() - testField.min()
+                    val spreadDiff = kotlin.math.abs(spread - 7.0f)
+                    spreadDiff * 5f  // Бонус за отличие от проблемного spread
+                } else 0f
+
+                val score = rescueBonus + spreadBonus - attractorPenalty - clusterPenalty - sequentialPenalty
+
+                if (score > bestScore) {
+                    bestScore = score
+                    bestCandidate = candidate
+                }
+            }
+
+            results.add(bestCandidate)
+        }
+
+        return results.sorted()
+    }
+
+    /**
+     * Генерация двух полей для мертвой зоны с максимальной анти-зеркальностью
+     */
+    private fun generateDeadZoneFields(
+        entropyBytes: ByteArray,
+        kp: Float
+    ): Pair<List<Int>, List<Int>> {
+
+        // Создаем максимально разные entropy для полей
+        val entropy1 = entropyBytes
+        val entropy2 = entropyBytes.copyOf().apply {
+            val deadZoneSalt = "ANTI_MIRROR_${System.nanoTime()}".toByteArray()
+            for (i in indices) {
+                this[i] = (this[i].toInt() xor
+                        deadZoneSalt[i % deadZoneSalt.size].toInt() xor
+                        (kp * 1000).toInt()).toByte()
+            }
+        }
+
+        val field1 = generateDeadZoneCorrected(4, 1, 20, entropy1, kp)
+        val field2 = generateDeadZoneCorrected(4, 1, 20, entropy2, kp)
+
+        // ПРОВЕРЯЕМ КАЧЕСТВО РЕЗУЛЬТАТА
+        val intersection = field1.intersect(field2.toSet()).size
+        val totalClusters = calculateSpatialPenalty(field1 + field2)
+
+        // Если результат все равно плохой - пересоздаем field2
+        if (intersection > 0 || totalClusters > 15f) {
+            val entropy3 = entropyBytes.copyOf().apply {
+                val reSalt = "RESCUE_ATTEMPT_${kp}_${System.nanoTime()}".toByteArray()
+                for (i in indices) {
+                    this[i] = (this[i].toInt() xor reSalt[i % reSalt.size].toInt()).toByte()
+                }
+            }
+            val newField2 = generateDeadZoneCorrected(4, 1, 20, entropy3, kp)
+            return Pair(field1, newField2)
         }
 
         return Pair(field1, field2)
