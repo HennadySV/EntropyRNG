@@ -142,9 +142,13 @@ class WeightedGenerator {
         min: Int,
         max: Int,
         entropyBytes: ByteArray,
-        kp: Float
+        kp: Float,
+        customAttractor: Map<Int, Float>? = null
     ): List<Int> {
-        val attractor = getKpAttractor(kp)
+        // Для форматов лотереи без собственной ручной калибровки (например 4х17)
+        // сюда передаются веса, посчитанные из реальной истории тиражей
+        // (EntropyAnalyzer.calculateKpAdjustedWeights) вместо зашитой таблицы под 4х20.
+        val attractor = customAttractor ?: getKpAttractor(kp)
         val results = mutableListOf<Int>()
 
         // Создаём более сильный seed mixing

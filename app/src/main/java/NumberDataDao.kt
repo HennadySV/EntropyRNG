@@ -60,6 +60,14 @@ interface NumberDataDao {
     suspend fun getByLotteryType(type: String): List<NumberData>
 
     /**
+     * Получить тиражи лотереи (без сгенерированных записей) конкретного формата.
+     * Нужно, чтобы "Веса" и "KP+Space" считались отдельно для 4х20 и 4х17,
+     * а не смешивали историю разных лотерей.
+     */
+    @Query("SELECT * FROM lottery_draws WHERE source IN ('lottery', 'imported') AND lotteryType = :type ORDER BY date DESC, time DESC")
+    suspend fun getLotteryDrawsOnlyByType(type: String): List<NumberData>
+
+    /**
      * Подсчитать общее количество записей
      */
     @Query("SELECT COUNT(*) FROM lottery_draws")
@@ -112,4 +120,11 @@ interface NumberDataDao {
      */
     @Query("SELECT * FROM lottery_draws WHERE iteration = :iteration LIMIT 1")
     suspend fun getByIteration(iteration: String): NumberData?
+
+    /**
+     * То же самое, но с учётом типа лотереи — у 4х20 и 4х17 своя независимая
+     * нумерация тиражей, поэтому совпадение iteration само по себе ничего не значит.
+     */
+    @Query("SELECT * FROM lottery_draws WHERE iteration = :iteration AND lotteryType = :type LIMIT 1")
+    suspend fun getByIterationAndType(iteration: String, type: String): NumberData?
 }

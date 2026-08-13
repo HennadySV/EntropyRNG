@@ -17,6 +17,17 @@ class EntropyAnalyzer(private val db: AppDatabase) {
     private val converters = Converters()
 
     /**
+     * Тиражи лотереи из БД, отфильтрованные по типу если он указан.
+     * lotteryType == null → старое поведение (все типы вперемешку, для обратной совместимости).
+     */
+    private suspend fun getDraws(lotteryType: String?): List<NumberData> =
+        if (lotteryType != null) {
+            db.numberDataDao().getLotteryDrawsOnlyByType(lotteryType)
+        } else {
+            db.numberDataDao().getLotteryDrawsOnly()
+        }
+
+    /**
      * Результат анализа
      */
     data class AnalysisResult(
@@ -37,11 +48,12 @@ class EntropyAnalyzer(private val db: AppDatabase) {
     suspend fun analyzeAndCalculateWeights(
         minRange: Int,
         maxRange: Int,
-        useFrequencyOnly: Boolean = true
+        useFrequencyOnly: Boolean = true,
+        lotteryType: String? = null
     ): AnalysisResult = withContext(Dispatchers.IO) {
 
-        // Получаем все тиражи лотереи
-        val allDraws = db.numberDataDao().getLotteryDrawsOnly()
+        // Получаем тиражи лотереи (только нужного типа, если он указан)
+        val allDraws = getDraws(lotteryType)
 
         if (allDraws.isEmpty()) {
             return@withContext AnalysisResult(
@@ -134,10 +146,11 @@ class EntropyAnalyzer(private val db: AppDatabase) {
      */
     suspend fun analyzeSolarCorrelation(
         minRange: Int,
-        maxRange: Int
+        maxRange: Int,
+        lotteryType: String? = null
     ): Map<Int, Float> = withContext(Dispatchers.IO) {
 
-        val draws = db.numberDataDao().getLotteryDrawsOnly()
+        val draws = getDraws(lotteryType)
         val kpDao = db.kpHistoryDao()
 
         if (draws.isEmpty()) {
@@ -224,15 +237,16 @@ class EntropyAnalyzer(private val db: AppDatabase) {
     suspend fun calculateKpAdjustedWeights(
         minRange: Int,
         maxRange: Int,
-        currentKp: Float
+        currentKp: Float,
+        lotteryType: String? = null
     ): Map<Int, Float> = withContext(Dispatchers.IO) {
 
         // 1. Базовые веса (частоты)
-        val analysisResult = analyzeAndCalculateWeights(minRange, maxRange, true)
+        val analysisResult = analyzeAndCalculateWeights(minRange, maxRange, true, lotteryType)
         val frequencyWeights = analysisResult.weights
 
         // 2. Пытаемся получить корреляции с Kp
-        val avgKpPerNumber = analyzeSolarCorrelation(minRange, maxRange)
+        val avgKpPerNumber = analyzeSolarCorrelation(minRange, maxRange, lotteryType)
 
         // Если нет данных по Kp → возвращаем только частоты
         if (avgKpPerNumber.isEmpty()) {
@@ -282,10 +296,11 @@ class EntropyAnalyzer(private val db: AppDatabase) {
      */
     suspend fun analyzeMagneticCorrelation(
         minRange: Int,
-        maxRange: Int
+        maxRange: Int,
+        lotteryType: String? = null
     ): Map<Int, Float> = withContext(Dispatchers.IO) {
 
-        val draws = db.numberDataDao().getLotteryDrawsOnly()
+        val draws = getDraws(lotteryType)
             .filter {
                 it.magneticFieldX != null &&
                         it.magneticFieldY != null &&
@@ -311,13 +326,14 @@ class EntropyAnalyzer(private val db: AppDatabase) {
         maxRange: Int,
         frequencyWeight: Float = 0.7f,      // Вес частоты (70%)
         solarWeight: Float = 0.2f,          // Вес солнечной активности (20%)
-        magneticWeight: Float = 0.1f        // Вес магнитного поля (10%)
+        magneticWeight: Float = 0.1f,       // Вес магнитного поля (10%)
+        lotteryType: String? = null
     ): Map<Int, Float> = withContext(Dispatchers.IO) {
 
         // Получаем все веса
-        val freqWeights = analyzeAndCalculateWeights(minRange, maxRange).weights
-        val solarWeights = analyzeSolarCorrelation(minRange, maxRange)
-        val magneticWeights = analyzeMagneticCorrelation(minRange, maxRange)
+        val freqWeights = analyzeAndCalculateWeights(minRange, maxRange, true, lotteryType).weights
+        val solarWeights = analyzeSolarCorrelation(minRange, maxRange, lotteryType)
+        val magneticWeights = analyzeMagneticCorrelation(minRange, maxRange, lotteryType)
 
         // Комбинируем веса
         val combinedWeights = mutableMapOf<Int, Float>()

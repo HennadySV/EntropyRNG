@@ -29,6 +29,29 @@
             android:textColor="#666666"
             android:layout_marginBottom="16dp" />
 
+        <!-- Выбор формата лотереи -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Формат лотереи:"
+            android:textSize="14sp" />
+
+        <Spinner
+            android:id="@+id/lotteryTypeSpinner"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="4dp" />
+
+        <!-- Описание текущего формата -->
+        <TextView
+            android:id="@+id/lotteryFormatInfo"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="2 поля по 4 числа, диапазон 1-20"
+            android:textSize="12sp"
+            android:textColor="#666666"
+            android:layout_marginBottom="16dp" />
+
         <!-- Разделитель -->
         <View
             android:layout_width="match_parent"

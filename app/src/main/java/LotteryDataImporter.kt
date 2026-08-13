@@ -31,7 +31,18 @@ class LotteryDataImporter(private val context: Context) {
     //  Публичный метод
     // ─────────────────────────────────────────────────────────────
 
-    suspend fun importFromCsv(uri: Uri): ImportResult = withContext(Dispatchers.IO) {
+    /**
+     * @param lotteryType к какому формату лотереи относится файл, например
+     *   "Премьер 4х20" или "Премьер 4х17" — записывается в NumberData.lotteryType
+     *   и используется для проверки дублей (тиражи разных форматов нумеруются независимо).
+     * @param maxNumber верхняя граница диапазона чисел для этого формата (20 для 4х20, 17 для 4х17).
+     *   Числа вне 1..maxNumber в строке считаются ошибкой парсинга поля.
+     */
+    suspend fun importFromCsv(
+        uri: Uri,
+        lotteryType: String,
+        maxNumber: Int
+    ): ImportResult = withContext(Dispatchers.IO) {
         var added    = 0
         var updated  = 0
         var skipped  = 0
@@ -61,7 +72,7 @@ class LotteryDataImporter(private val context: Context) {
 
                         if (trimmed.isNotEmpty()) {
                             try {
-                                val parsed = parseLine(trimmed)
+                                val parsed = parseLine(trimmed, lotteryType, maxNumber)
 
                                 if (parsed != null) {
                                     val result = upsertDraw(parsed)
@@ -109,7 +120,9 @@ class LotteryDataImporter(private val context: Context) {
     // ─────────────────────────────────────────────────────────────
 
     private suspend fun upsertDraw(parsed: NumberData): UpsertAction {
-        val existing = db.numberDataDao().getByIteration(parsed.iteration)
+        // Ищем дубль в пределах ТОГО ЖЕ формата лотереи — у 4х20 и 4х17
+        // независимая нумерация тиражей, совпадение iteration между ними ничего не значит.
+        val existing = db.numberDataDao().getByIterationAndType(parsed.iteration, parsed.lotteryType ?: "")
 
         return when {
             // Записи нет — просто вставляем
@@ -169,7 +182,7 @@ class LotteryDataImporter(private val context: Context) {
      *   col3 = поле 1         (8, 11, 13, 14)   — кавычки уже сняты парсером
      *   col4 = поле 2         (11, 1, 8, 10)
      */
-    private fun parseLine(line: String): NumberData? {
+    private fun parseLine(line: String, lotteryType: String, maxNumber: Int): NumberData? {
         val cols = splitCsvLine(line)
         if (cols.size < 5) return null
 
@@ -180,8 +193,8 @@ class LotteryDataImporter(private val context: Context) {
         val timeStr = cols[2].trim().replace(" МСК", "").trim()
 
         // Парсим числа из обоих полей
-        val field1 = parseNumberList(cols[3])
-        val field2 = parseNumberList(cols[4])
+        val field1 = parseNumberList(cols[3], maxNumber)
+        val field2 = parseNumberList(cols[4], maxNumber)
 
         if (field1.isEmpty() && field2.isEmpty()) return null
 
@@ -198,7 +211,7 @@ class LotteryDataImporter(private val context: Context) {
             time        = time,
             numbers     = numbers,
             source      = "imported",
-            lotteryType = "Премьер",
+            lotteryType = lotteryType,
             metadata    = "Imported from results CSV"
         )
     }
@@ -206,10 +219,10 @@ class LotteryDataImporter(private val context: Context) {
     /**
      * Парсит строку вида "8, 11, 13, 14" → listOf(8, 11, 13, 14)
      */
-    private fun parseNumberList(raw: String): List<Int> =
+    private fun parseNumberList(raw: String, maxNumber: Int): List<Int> =
         raw.split(",")
             .mapNotNull { it.trim().toIntOrNull() }
-            .filter { it in 1..20 }
+            .filter { it in 1..maxNumber }
 
     // ─────────────────────────────────────────────────────────────
     //  Дата / время

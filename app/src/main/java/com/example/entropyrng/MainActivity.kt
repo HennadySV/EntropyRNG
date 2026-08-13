@@ -34,15 +34,36 @@ import com.example.entropyrng.export.DatabaseExporter
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import org.json.JSONArray
 import java.nio.ByteBuffer
 import java.util.concurrent.ArrayBlockingQueue
 import kotlin.concurrent.thread
 import android.os.Looper
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.delay
+
+/**
+ * Поддерживаемые форматы лотереи.
+ *
+ * PREMIER_4X20 / PREMIER_4X17 хранят собственную историю тиражей (импорт CSV,
+ * "Веса" и "KP+Space" считаются каждый по своим данным, см. lotteryType в NumberData)
+ * и всегда генерируют два поля по 4 числа.
+ *
+ * CUSTOM — произвольный диапазон/количество (например "8 из 72"): без истории,
+ * всегда один кортеж на `count` чисел, без принудительной разбивки на поля.
+ */
+enum class LotteryFormat(
+    val label: String,       // значение, сохраняемое в NumberData.lotteryType
+    val displayName: String, // текст в выпадающем списке
+    val minNumber: Int,
+    val maxNumber: Int,
+    val fieldSize: Int,      // чисел в одном поле, если split == true
+    val split: Boolean,      // делить ли результат на два поля
+    val storesHistory: Boolean // доступны ли импорт CSV / "Веса" / данные для "KP+Space"
+) {
+    PREMIER_4X20("Премьер 4х20", "Премьер 4х20 (2 поля по 4, 1-20)", 1, 20, 4, true, true),
+    PREMIER_4X17("Премьер 4х17", "Премьер 4х17 (2 поля по 4, 1-17)", 1, 17, 4, true, true),
+    CUSTOM("", "Произвольный (одно поле)", 1, 100, 0, false, false)
+}
 
 class MainActivity : AppCompatActivity(), SensorEventListener {
 
@@ -67,6 +88,12 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     private lateinit var kpManager: KpIndexManager
     private lateinit var exporter: DatabaseExporter
 
+    // ===== Формат лотереи (4х20 / 4х17 / произвольный) =====
+    private var currentLotteryFormat: LotteryFormat = LotteryFormat.PREMIER_4X20
+
+    // ===== Kp: только реально полученное значение, никогда не подставляем случайное =====
+    private var lastRealKp: Float? = null
+
     // ===== Кеш весов =====
     private var currentWeights: Map<Int, Float>? = null
     private var lastAnalysisResult: EntropyAnalyzer.AnalysisResult? = null
@@ -84,19 +111,26 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     private lateinit var weightsInfo: TextView
     private lateinit var solarInfo: TextView
     private lateinit var statsInfo: TextView
+    private lateinit var lotteryTypeSpinner: Spinner
+    private lateinit var lotteryFormatInfo: TextView
 
     // ===== Лаунчер для импорта CSV =====
     private val pickCsvLauncher = registerForActivityResult(
         ActivityResultContracts.GetContent()
     ) { uri ->
         uri?.let {
+            val format = currentLotteryFormat
+            if (!format.storesHistory) {
+                Toast.makeText(this, "Для произвольного формата импорт истории недоступен. Выберите Премьер 4х20 или 4х17.", Toast.LENGTH_LONG).show()
+                return@let
+            }
             lifecycleScope.launch {
                 try {
                     importButton.isEnabled = false
                     statsInfo.text = "Импорт..."
-                    Toast.makeText(this@MainActivity, "Импорт запущен...", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this@MainActivity, "Импорт запущен (${format.label})...", Toast.LENGTH_SHORT).show()
 
-                    val result = importer.importFromCsv(it)
+                    val result = importer.importFromCsv(it, format.label, format.maxNumber)
 
                     if (result.success) {
                         // Детальное сообщение: добавлено / обновлено / пропущено
@@ -155,20 +189,22 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
      * Проверяет наличие данных в БД и активирует кнопки
      */
     private suspend fun checkDatabaseAndEnableButtons() = withContext(Dispatchers.IO) {
-        val lotteryCount = db.numberDataDao().getCountBySource("lottery") +
-                db.numberDataDao().getCountBySource("imported")
+        val format = currentLotteryFormat
+        val lotteryCount = if (format.storesHistory) {
+            db.numberDataDao().getLotteryDrawsOnlyByType(format.label).size
+        } else 0
 
         withContext(Dispatchers.Main) {
-            if (lotteryCount > 0) {
-                // Есть данные → активируем кнопку "Анализ"
+            if (format.storesHistory && lotteryCount > 0) {
+                // Есть данные по текущему формату → активируем кнопку "Анализ"
                 analyzeButton.isEnabled = true
                 Toast.makeText(
                     this@MainActivity,
-                    "Найдено $lotteryCount тиражей в БД",
+                    "Найдено $lotteryCount тиражей (${format.label}) в БД",
                     Toast.LENGTH_SHORT
                 ).show()
             } else {
-                // Нет данных → кнопка остаётся неактивной
+                // Нет данных по этому формату → кнопка остаётся неактивной
                 analyzeButton.isEnabled = false
             }
         }
@@ -272,6 +308,24 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         weightsInfo = findViewById(R.id.weightsInfo)
         solarInfo = findViewById(R.id.solarInfo)
         statsInfo = findViewById(R.id.statsInfo)
+        lotteryFormatInfo = findViewById(R.id.lotteryFormatInfo)
+
+        // Выбор формата лотереи
+        lotteryTypeSpinner = findViewById(R.id.lotteryTypeSpinner)
+        val formats = LotteryFormat.values()
+        lotteryTypeSpinner.adapter = ArrayAdapter(
+            this,
+            android.R.layout.simple_spinner_dropdown_item,
+            formats.map { it.displayName }
+        )
+        lotteryTypeSpinner.setSelection(formats.indexOf(currentLotteryFormat))
+        lotteryTypeSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: android.view.View?, position: Int, id: Long) {
+                applyLotteryFormat(formats[position])
+            }
+            override fun onNothingSelected(parent: AdapterView<*>?) {}
+        }
+        applyLotteryFormat(currentLotteryFormat)
 
         // Обработчики событий
         generateButton.setOnClickListener { onGenerateClick() }
@@ -289,73 +343,29 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
             // Кнопка не найдена - не критично
         }
 
-        // ПРОСТОЕ обновление Kp (БЕЗ ошибок)
+        // Обновление Kp: только реальные данные NOAA через KpIndexManager (сохраняет в БД сам).
+        // ВАЖНО: при сбое сети/API НЕ подставляем случайное число — честно показываем ошибку
+        // и не трогаем lastRealKp, иначе KP+Space будет тайком генерировать на рандоме,
+        // выдавая его за "реальный космос" (это и был баг №1).
         solarInfo.setOnClickListener {
             lifecycleScope.launch {
-                try {
-                    solarInfo.text = "Kp: загружаю из космоса..."
+                solarInfo.text = "Kp: загружаю из космоса..."
 
-                    // ПОЛУЧАЕМ реальный Kp
-                    val currentKp = withContext(Dispatchers.IO) {
-                        try {
-                            // Прямой запрос к NOAA API
-                            val client = okhttp3.OkHttpClient()
-                            val request = okhttp3.Request.Builder()
-                                .url("https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json")
-                                .header("User-Agent", "EntropyRNG App")
-                                .build()
-
-                            val response = client.newCall(request).execute()
-                            if (response.isSuccessful) {
-                                val jsonData = response.body?.string() ?: "[]"
-                                val jsonArray = org.json.JSONArray(jsonData)
-
-                                if (jsonArray.length() > 0) {
-                                    val latest = jsonArray.getJSONArray(jsonArray.length() - 1)
-                                    val kpValue = latest.getString(1).toFloat()
-                                    kpValue
-                                } else {
-                                    throw Exception("No data")
-                                }
-                            } else {
-                                throw Exception("HTTP ${response.code}")
-                            }
-                        } catch (e: Exception) {
-                            // Fallback на случайный если API не работает
-                            2.0f + kotlin.random.Random.nextFloat() * 3.0f
-                        }
+                when (val result = kpManager.fetchAndSaveCurrentKp()) {
+                    is KpResult.Success -> {
+                        lastRealKp = result.value
+                        solarInfo.text = "Kp: ${result.value} (NOAA, реальные данные)"
+                        updateModeDescription()
+                        Toast.makeText(this@MainActivity, "Kp получен: ${result.value}", Toast.LENGTH_SHORT).show()
                     }
-
-                    solarInfo.text = "Kp: $currentKp (космос)"
-                    updateModeDescription()
-
-                    // Сохраняем в БД
-                    withContext(Dispatchers.IO) {
-                        try {
-                            db.openHelper.writableDatabase.execSQL(
-                                "INSERT INTO kp_history (date, time, kpValue, source, createdAt) VALUES (?, ?, ?, ?, ?)",
-                                arrayOf(
-                                    java.time.LocalDate.now().toString(),
-                                    java.time.LocalTime.now().toString(),
-                                    currentKp.toString(),
-                                    "real_noaa_api",  // ← Реальный источник
-                                    System.currentTimeMillis().toString()
-                                )
-                            )
-
-                            withContext(Dispatchers.Main) {
-                                Toast.makeText(this@MainActivity, "Реальный Kp получен: $currentKp", Toast.LENGTH_LONG).show()
-                            }
-                        } catch (e: Exception) {
-                            withContext(Dispatchers.Main) {
-                                Toast.makeText(this@MainActivity, "Kp получен, но ошибка БД", Toast.LENGTH_SHORT).show()
-                            }
-                        }
+                    is KpResult.Error -> {
+                        solarInfo.text = "Kp: ошибка API (${result.message})"
+                        Toast.makeText(
+                            this@MainActivity,
+                            "Не удалось получить Kp: ${result.message}. Прежнее значение не менялось.",
+                            Toast.LENGTH_LONG
+                        ).show()
                     }
-
-                } catch (e: Exception) {
-                    solarInfo.text = "Kp: ошибка API"
-                    Toast.makeText(this@MainActivity, "Ошибка космоса: ${e.message}", Toast.LENGTH_LONG).show()
                 }
             }
         }
@@ -370,6 +380,50 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
 
         analyzeButton.isEnabled = false
         modeSwitch.isEnabled = false
+    }
+
+    /**
+     * Переключение активного формата лотереи.
+     * Премьер 4х20 / 4х17: диапазон и количество фиксированы, доступны импорт/анализ/веса,
+     * генерация всегда даёт 2 поля по 4 числа.
+     * Произвольный: диапазон/количество свободные, история и веса недоступны,
+     * генерация всегда одним полем (например "8 из 72").
+     */
+    private fun applyLotteryFormat(format: LotteryFormat) {
+        currentLotteryFormat = format
+
+        if (format.storesHistory) {
+            editMin.setText(format.minNumber.toString())
+            editMax.setText(format.maxNumber.toString())
+            editCount.setText((format.fieldSize * 2).toString())
+            editMin.isEnabled = false
+            editMax.isEnabled = false
+            editCount.isEnabled = false
+            lotteryFormatInfo.text = "2 поля по ${format.fieldSize} числа, диапазон ${format.minNumber}-${format.maxNumber}"
+            importButton.isEnabled = true
+        } else {
+            editMin.isEnabled = true
+            editMax.isEnabled = true
+            editCount.isEnabled = true
+            lotteryFormatInfo.text = "Одно поле, диапазон и количество — свои"
+            importButton.isEnabled = false
+        }
+
+        // У разных форматов разная (или отсутствующая) история — старые веса/анализ больше не актуальны
+        currentWeights = null
+        lastAnalysisResult = null
+        weightsInfo.text = "Топ числа: -"
+        modeSwitch.isChecked = false
+        modeSwitch.isEnabled = false
+
+        // "Веса" и "KP+Space" в произвольном формате не имеют смысла — истории для них нет
+        if (!format.storesHistory && currentGenerationMode != WeightedGenerator.GenerationMode.PURE_ENTROPY) {
+            currentGenerationMode = WeightedGenerator.GenerationMode.PURE_ENTROPY
+            updateModeButtonText()
+        }
+        updateModeDescription()
+
+        lifecycleScope.launch { checkDatabaseAndEnableButtons() }
     }
 
     private fun setupPermissions() {
@@ -400,6 +454,19 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     // ===== Обработчики кнопок =====
 
     private fun onGenerateClick() {
+        val format = currentLotteryFormat
+
+        // Режим KP+Space без реально полученного Kp не запускаем — раньше здесь
+        // тихо подставлялось случайное число, выданное за "реальные данные из космоса" (баг №1).
+        if (currentGenerationMode == WeightedGenerator.GenerationMode.KP_SPATIAL && lastRealKp == null) {
+            Toast.makeText(
+                this,
+                "Нет актуального Kp. Нажмите на строку Kp ниже, чтобы получить реальное значение с NOAA.",
+                Toast.LENGTH_LONG
+            ).show()
+            return
+        }
+
         lifecycleScope.launch {
             try {
                 generateButton.isEnabled = false
@@ -407,25 +474,24 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
 
                 // Получаем энтропию и параметры
                 val entropyData = collectEntropy()
-                val min = editMin.text.toString().toIntOrNull() ?: 1
-                val max = editMax.text.toString().toIntOrNull() ?: 20
-                val count = editCount.text.toString().toIntOrNull() ?: 8
-                val isPremierMode = count == 8
-                val validMax = max.coerceAtMost(20)
 
-                // ИСПРАВЛЕНИЕ: Получаем актуальный Kp из kpManager
-                // Получаем актуальный Kp
-                // ПРОСТОЕ РЕШЕНИЕ: читаем Kp только из solarInfo
-                var kp = 2.0f
-                try {
-                    val solarText = solarInfo.text?.toString() ?: ""
-                    val kpMatch = Regex("Kp:\\s*(\\d+\\.?\\d*)").find(solarText)
-                    kp = kpMatch?.groupValues?.get(1)?.toFloat() ?: 2.0f
-                } catch (e: Exception) {
-                    kp = 2.0f
-                }
-                val isDeadZone = kp in 3.0f..4.0f
+                // Диапазон и количество берём из формата лотереи (Премьер 4х20/4х17 — фиксированные,
+                // Произвольный — то, что ввёл пользователь; поля editMin/Max/Count заблокированы/разблокированы
+                // соответственно в applyLotteryFormat()).
+                val min = if (format.storesHistory) format.minNumber else (editMin.text.toString().toIntOrNull() ?: 1)
+                val userMax = if (format.storesHistory) format.maxNumber else (editMax.text.toString().toIntOrNull() ?: 20)
+                val validMax = userMax.coerceAtLeast(min)
+                val count = if (format.storesHistory) format.fieldSize * 2 else (editCount.text.toString().toIntOrNull() ?: 8).coerceAtLeast(1)
+                val splitMode = format.split
+                val fieldSize = format.fieldSize
+
+                // Только реально полученное значение (проверено выше для KP_SPATIAL);
+                // для остальных режимов kp не влияет на сами числа, только на доп. энтропию поля 2.
+                val kp = lastRealKp ?: 0f
+                val hasRealKp = lastRealKp != null
+                val isDeadZone = hasRealKp && kp in 3.0f..4.0f
                 val kpZoneInfo = when {
+                    !hasRealKp -> "— нет данных"
                     kp <= 2.0f -> "🔷 ШТИЛЬ"
                     kp in 2.0f..3.0f -> "🔹 НОРМА"
                     kp in 3.0f..4.0f -> "⚠️ МЕРТВАЯ ЗОНА"
@@ -435,9 +501,16 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
                     outputText.text = "⚠️ Обнаружена мертвая зона!\nКомпенсируем предохранители TRNG..."
                 }
 
+                // Для форматов без собственной вручную откалиброванной таблицы аттракторов (всё кроме 4х20)
+                // KP+Space считает веса из РЕАЛЬНОЙ истории тиражей этого формата, а не из чужой таблицы под 4х20.
+                val kpAttractorOverride: Map<Int, Float>? =
+                    if (currentGenerationMode == WeightedGenerator.GenerationMode.KP_SPATIAL && format != LotteryFormat.PREMIER_4X20) {
+                        analyzer.calculateKpAdjustedWeights(min, validMax, kp, if (format.storesHistory) format.label else null)
+                    } else null
+
                 // Генерируем числа в зависимости от режима
-                val numbers = if (isPremierMode) {
-                    // ИСПРАВЛЕНИЕ: Разная энтропия для полей против зеркальности
+                val numbers = if (splitMode) {
+                    // Разная энтропия для полей против зеркальности
                     val entropy1 = entropyData
                     val entropy2 = entropyData.copyOf().apply {
                         // Микшируем энтропию для field2 + добавляем Kp и время
@@ -453,28 +526,28 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
 
                     val (field1, field2) = when (currentGenerationMode) {
                         WeightedGenerator.GenerationMode.KP_SPATIAL -> {
-                            val f1 = generator.generateKpSpatialMode(4, min, validMax, entropy1, kp)
-                            val f2 = generator.generateKpSpatialMode(4, min, validMax, entropy2, kp)
+                            val f1 = generator.generateKpSpatialMode(fieldSize, min, validMax, entropy1, kp, kpAttractorOverride)
+                            val f2 = generator.generateKpSpatialMode(fieldSize, min, validMax, entropy2, kp, kpAttractorOverride)
                             Pair(f1, f2)
                         }
                         WeightedGenerator.GenerationMode.WEIGHTED_ENTROPY -> {
                             val weights = currentWeights ?: emptyMap()
-                            val f1 = generator.generateWeightedEntropy(4, min, validMax, entropy1, kp, weights)
-                            val f2 = generator.generateWeightedEntropy(4, min, validMax, entropy2, kp, weights)
+                            val f1 = generator.generateWeightedEntropy(fieldSize, min, validMax, entropy1, kp, weights)
+                            val f2 = generator.generateWeightedEntropy(fieldSize, min, validMax, entropy2, kp, weights)
                             Pair(f1, f2)
                         }
                         else -> {
-                            val f1 = generator.generatePureEntropy(4, min, validMax, entropy1, kp)
-                            val f2 = generator.generatePureEntropy(4, min, validMax, entropy2, kp)
+                            val f1 = generator.generatePureEntropy(fieldSize, min, validMax, entropy1, kp)
+                            val f2 = generator.generatePureEntropy(fieldSize, min, validMax, entropy2, kp)
                             Pair(f1, f2)
                         }
                     }
                     field1 + field2
                 } else {
-                    // Обычный режим - одно поле
+                    // Одно поле целиком (например "8 из 72": count=8, без разбивки)
                     when (currentGenerationMode) {
                         WeightedGenerator.GenerationMode.KP_SPATIAL -> {
-                            generator.generateKpSpatialMode(count, min, validMax, entropyData, kp)
+                            generator.generateKpSpatialMode(count, min, validMax, entropyData, kp, kpAttractorOverride)
                         }
                         WeightedGenerator.GenerationMode.WEIGHTED_ENTROPY -> {
                             val weights = currentWeights ?: emptyMap()
@@ -486,7 +559,6 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
                     }
                 }
 
-                // ИСПРАВЛЕНИЕ: Упрощаем сохранение в БД - только один раз
                 val magneticData = entropyData.take(12)
                 val magneticX = magneticData.getOrNull(0)?.toFloat()
                 val magneticY = magneticData.getOrNull(4)?.toFloat()
@@ -498,33 +570,21 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
                     time = java.time.LocalTime.now().toString(),
                     numbers = numbers,
                     source = "generated",
-                    lotteryType = if (isPremierMode) "Премьер" else "",
-                    kpIndex = kp,
+                    lotteryType = if (format.storesHistory) format.label else "",
+                    kpIndex = lastRealKp, // null если Kp не запрашивался — без фиктивных нулей в истории
                     magneticFieldX = magneticX,
                     magneticFieldY = magneticY,
                     magneticFieldZ = magneticZ,
                     metadata = "Mode: ${currentGenerationMode.name}"
                 )
 
-                // Сохраняем в БД
-                // Сохраняем в БД
                 withContext(Dispatchers.IO) {
                     db.numberDataDao().insert(data)
 
-                    // ПРЯМОЙ SQL в kp_history
-                    try {
-                        db.openHelper.writableDatabase.execSQL(
-                            "INSERT INTO kp_history (date, time, kpValue, source, createdAt) VALUES (?, ?, ?, ?, ?)",
-                            arrayOf(
-                                java.time.LocalDate.now().toString(),
-                                java.time.LocalTime.now().toString(),
-                                kp.toString(),
-                                "generation",
-                                System.currentTimeMillis().toString()
-                            )
-                        )
-                    } catch (e: Exception) {
-                        // Игнорируем ошибку
+                    // Логируем Kp только если он реальный — иначе в kp_history не должно попадать
+                    // ничего сгенерированного/случайного.
+                    if (hasRealKp) {
+                        kpManager.saveKpForGeneration(kp)
                     }
                 }
 
@@ -541,9 +601,11 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
                     WeightedGenerator.GenerationMode.KP_SPATIAL -> "Kp-Spatial"
                 }
 
-                val outputStr = if (isPremierMode) {
-                    val field1 = numbers.take(4)
-                    val field2 = numbers.drop(4)
+                val kpDisplay = if (hasRealKp) kp.toString() else "не запрошен"
+
+                val outputStr = if (splitMode) {
+                    val field1 = numbers.take(fieldSize)
+                    val field2 = numbers.drop(fieldSize)
                     val spread1 = field1.max() - field1.min()
                     val spread2 = field2.max() - field2.min()
                     val spreadDiff = kotlin.math.abs(spread1 - spread2)
@@ -552,15 +614,16 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
                     val intersection = field1.intersect(field2.toSet()).size
                     val mirrorWarning = if (intersection >= 2) " ⚠️ Зеркальность: $intersection" else ""
 
+                    val formatLabel = if (format.storesHistory) format.label else "Свой формат"
                     val baseText = """
-                    [$modeStr] Kp: $kp
-                    
+                    [$formatLabel] [$modeStr] Kp: $kpDisplay
+
                     ${modeIndicator} Поле 1: ${field1.joinToString(", ")}
                     spread: $spread1
-                    
+
                     ${modeIndicator} Поле 2: ${field2.joinToString(", ")}
                     spread: $spread2
-                    
+
                     Δ spread: $spreadDiff$mirrorWarning
                     """.trimIndent()
 
@@ -583,8 +646,8 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
                         baseText
                     }
                 } else {
-                    // Обычный режим (не Премьер)
-                    "[$modeStr]\nKp: $kp\n${modeIndicator} ${numbers.joinToString(", ")}"
+                    // Одно поле (Произвольный формат)
+                    "[$modeStr]\nKp: $kpDisplay\n${modeIndicator} ${numbers.joinToString(", ")}"
                 }
 
                 outputText.text = outputStr
@@ -592,7 +655,6 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
 
             } catch (e: Exception) {
                 outputText.text = "Ошибка: ${e.message}"
-                solarInfo.text = "Ошибка генерации: ${e.message}"
                 Toast.makeText(this@MainActivity, "Ошибка: ${e.message}", Toast.LENGTH_SHORT).show()
                 e.printStackTrace()
             } finally {
@@ -606,16 +668,22 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     }
 
     private fun onAnalyzeClick() {
+        val format = currentLotteryFormat
+        if (!format.storesHistory) {
+            Toast.makeText(this, "Для произвольного формата нет истории для анализа.", Toast.LENGTH_LONG).show()
+            return
+        }
+
         analyzeButton.isEnabled = false
         weightsInfo.text = "Анализ..."
 
         lifecycleScope.launch {
             try {
-                val min = editMin.text.toString().toIntOrNull() ?: 1
-                val max = editMax.text.toString().toIntOrNull() ?: 100
-                val validMax = max.coerceIn(min, 100)
+                val min = format.minNumber
+                val validMax = format.maxNumber
 
-                val result = analyzer.analyzeAndCalculateWeights(min, validMax, true)
+                // Считаем веса только по истории ВЫБРАННОГО формата (4х20 и 4х17 не смешиваются)
+                val result = analyzer.analyzeAndCalculateWeights(min, validMax, true, format.label)
 
                 lastAnalysisResult = result
                 currentWeights = result.weights
@@ -825,30 +893,6 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         rawEntropy
     }
 
-    // ===== Сетевые запросы =====
-
-    private suspend fun fetchKpIndex(): Float = withContext(Dispatchers.IO) {
-        try {
-            val client = OkHttpClient()
-            val request = Request.Builder()
-                .url("https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json")
-                .header("User-Agent", "EntropyRNG App")
-                .build()
-            val response = client.newCall(request).execute()
-            if (response.isSuccessful) {
-                val jsonText = response.body?.string() ?: return@withContext 0f
-                val jsonArray = JSONArray(jsonText)
-                if (jsonArray.length() > 1) {
-                    val lastEntry = jsonArray.getJSONArray(jsonArray.length() - 1)
-                    return@withContext lastEntry.getString(1).toFloatOrNull() ?: 0f
-                }
-            }
-        } catch (e: Exception) {
-            // Ошибка сети
-        }
-        0f
-    }
-
     // ===== Сохранение в БД =====
 
     private suspend fun saveGenerated(
@@ -963,6 +1007,11 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         }
     }
     private fun toggleGenerationMode() {
+        if (!currentLotteryFormat.storesHistory) {
+            // Произвольный формат: нет истории тиражей → нет "Весов" и нет KP+Space
+            Toast.makeText(this, "Для произвольного формата доступна только 'Энтропия' — нет исторических данных для весов.", Toast.LENGTH_LONG).show()
+            return
+        }
         currentGenerationMode = when (currentGenerationMode) {
             WeightedGenerator.GenerationMode.PURE_ENTROPY -> {
                 isKpSpatialMode = false
@@ -1052,14 +1101,10 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
      * Получение текущего значения Kp (для использования в генераторе)
      */
     private fun getCurrentKpValue(): Float {
-        return try {
-            // Читаем из solarInfo (синхронно)
-            val solarText = solarInfo.text?.toString() ?: ""
-            val kpMatch = Regex("Kp:\\s*(\\d+\\.?\\d*)").find(solarText)
-            kpMatch?.groupValues?.get(1)?.toFloat() ?: 2.0f
-        } catch (e: Exception) {
-            2.0f
-        }
+        // Только реально полученное значение; 2.0f тут — нейтральный дефолт для
+        // косметического описания режима, пока Kp вообще ни разу не запрашивался.
+        // Для самой генерации (KP+Space) отдельная проверка не даёт стартовать без lastRealKp.
+        return lastRealKp ?: 2.0f
     }
 
     /**
