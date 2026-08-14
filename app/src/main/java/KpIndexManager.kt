@@ -1,6 +1,7 @@
 package com.example.entropyrng.data
 
 import android.content.Context
+import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -29,13 +30,32 @@ class KpIndexManager(context: Context) {
             val client = OkHttpClient()
             val request = Request.Builder()
                 .url("https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json")
-                .header("User-Agent", "EntropyRNG App")
+                // Раньше тут был "EntropyRNG App" — нестандартный UA, под который CloudFront/WAF
+                // мог тихо отдавать пустое тело вместо честной блокировки. Ставим обычный
+                // браузерный UA, чтобы запрос ничем не отличался от того, что шлёт браузер.
+                .header(
+                    "User-Agent",
+                    "Mozilla/5.0 (Linux; Android 10; SM-N960F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
+                )
                 .build()
 
             val response = client.newCall(request).execute()
 
+            // Диагностика: пишем в логкат, что реально пришло, независимо от того,
+            // успешно распарсится JSON или нет — пригодится, если снова что-то пойдёт не так.
+            val jsonText = response.body?.string() ?: ""
+            Log.d(
+                "KpIndexManager",
+                "HTTP ${response.code} ${response.message}; " +
+                        "Content-Length header=${response.header("Content-Length")}; " +
+                        "actual body length=${jsonText.length}; " +
+                        "snippet=${jsonText.take(200)}"
+            )
+
             if (response.isSuccessful) {
-                val jsonText = response.body?.string() ?: return@withContext KpResult.Error("Empty response")
+                if (jsonText.isEmpty()) {
+                    return@withContext KpResult.Error("Пустой ответ от сервера (HTTP ${response.code})")
+                }
                 val jsonArray = JSONArray(jsonText)
 
                 if (jsonArray.length() > 1) {
