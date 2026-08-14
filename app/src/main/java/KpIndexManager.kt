@@ -122,6 +122,27 @@ class KpIndexManager(context: Context) {
     }
 
     /**
+     * Сохранить Kp, введённый пользователем вручную — когда авто-получение недоступно
+     * (NOAA/CloudFront держит этот эндпоинт за JS-проверкой, которую обычный HTTP-клиент
+     * пройти не может). Источник помечается как "manual", отдельно от "auto" и "generation",
+     * чтобы в статистике и анализе было честно видно, откуда взялось значение.
+     */
+    suspend fun saveManualKp(kpValue: Float): KpHistoryData = withContext(Dispatchers.IO) {
+        val calendar = Calendar.getInstance()
+        val date = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(calendar.time)
+        val time = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(calendar.time)
+
+        val kpData = KpHistoryData(
+            date = date,
+            time = time,
+            kpValue = kpValue,
+            source = "manual"
+        )
+        kpDao.insert(kpData)
+        kpData
+    }
+
+    /**
      * Получить статистику по Kp
      */
     suspend fun getKpStatistics(): KpStatistics = withContext(Dispatchers.IO) {

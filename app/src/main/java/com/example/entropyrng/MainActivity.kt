@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.graphics.ImageFormat
 import android.hardware.Sensor
 import android.hardware.SensorEvent
@@ -27,7 +28,6 @@ import com.example.entropyrng.analysis.EntropyAnalyzer
 import com.example.entropyrng.data.AppDatabase
 import com.example.entropyrng.data.NumberData
 import com.example.entropyrng.data.KpIndexManager
-import com.example.entropyrng.data.KpResult
 import com.example.entropyrng.generation.WeightedGenerator
 import com.example.entropyrng.import.LotteryDataImporter
 import com.example.entropyrng.export.DatabaseExporter
@@ -40,6 +40,11 @@ import kotlin.concurrent.thread
 import android.os.Looper
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.delay
+
+/**
+ * Страница NOAA с текущим Kp. Самая последняя (нижняя) запись в списке — самые свежие данные.
+ */
+private const val NOAA_KP_URL = "https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json"
 
 /**
  * Поддерживаемые форматы лотереи.
@@ -343,31 +348,21 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
             // Кнопка не найдена - не критично
         }
 
-        // Обновление Kp: только реальные данные NOAA через KpIndexManager (сохраняет в БД сам).
-        // ВАЖНО: при сбое сети/API НЕ подставляем случайное число — честно показываем ошибку
-        // и не трогаем lastRealKp, иначе KP+Space будет тайком генерировать на рандоме,
-        // выдавая его за "реальный космос" (это и был баг №1).
+        // Kp: автоматическое получение через NOAA API ненадёжно — этот эндпоинт стоит за
+        // JS-проверкой CloudFront/WAF (HTTP 202 + пустое тело), которую обычный HTTP-клиент
+        // пройти не может в принципе, никакие ретраи/заголовки не помогают.
+        // Поэтому короткий тап открывает страницу NOAA в браузере (там JS отрабатывает,
+        // значение видно), а долгое нажатие — ввод увиденного значения вручную.
         solarInfo.setOnClickListener {
-            lifecycleScope.launch {
-                solarInfo.text = "Kp: загружаю из космоса..."
-
-                when (val result = kpManager.fetchAndSaveCurrentKp()) {
-                    is KpResult.Success -> {
-                        lastRealKp = result.value
-                        solarInfo.text = "Kp: ${result.value} (NOAA, реальные данные)"
-                        updateModeDescription()
-                        Toast.makeText(this@MainActivity, "Kp получен: ${result.value}", Toast.LENGTH_SHORT).show()
-                    }
-                    is KpResult.Error -> {
-                        solarInfo.text = "Kp: ошибка API (${result.message})"
-                        Toast.makeText(
-                            this@MainActivity,
-                            "Не удалось получить Kp: ${result.message}. Прежнее значение не менялось.",
-                            Toast.LENGTH_LONG
-                        ).show()
-                    }
-                }
+            try {
+                startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(NOAA_KP_URL)))
+            } catch (e: Exception) {
+                Toast.makeText(this, "Не удалось открыть браузер: ${e.message}", Toast.LENGTH_SHORT).show()
             }
+        }
+        solarInfo.setOnLongClickListener {
+            showManualKpDialog()
+            true
         }
 
         // Остальные обработчики
@@ -1094,6 +1089,41 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
             .setMessage(modeDetails)
             .setPositiveButton("Понятно") { _, _ -> }
             .setNeutralButton("Переключить") { _, _ -> toggleGenerationMode() }
+            .show()
+    }
+
+    /**
+     * Диалог ручного ввода Kp. Пользователь сам смотрит значение в открывшемся браузере
+     * (самая последняя/нижняя запись в списке — самые свежие данные) и вводит его сюда.
+     * Помечается в базе источником "manual" — честно, не выдаётся за авто-полученное.
+     */
+    private fun showManualKpDialog() {
+        val input = EditText(this).apply {
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER or android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL or android.text.InputType.TYPE_NUMBER_FLAG_SIGNED
+            hint = "Например: 1.67"
+        }
+
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Ввести Kp вручную")
+            .setMessage("Посмотрите значение в открывшейся странице NOAA — берите самую последнюю (нижнюю) запись в списке, это самые свежие данные.")
+            .setView(input)
+            .setPositiveButton("Сохранить") { _, _ ->
+                val value = input.text.toString().trim().replace(",", ".").toFloatOrNull()
+                if (value == null) {
+                    Toast.makeText(this, "Не удалось распознать число", Toast.LENGTH_SHORT).show()
+                    return@setPositiveButton
+                }
+                lifecycleScope.launch {
+                    withContext(Dispatchers.IO) {
+                        kpManager.saveManualKp(value)
+                    }
+                    lastRealKp = value
+                    solarInfo.text = "Kp: $value (введено вручную)"
+                    updateModeDescription()
+                    Toast.makeText(this@MainActivity, "Сохранено: Kp=$value", Toast.LENGTH_SHORT).show()
+                }
+            }
+            .setNegativeButton("Отмена", null)
             .show()
     }
 
